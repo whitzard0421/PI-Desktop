@@ -3,6 +3,7 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 import { apiStyleForAdapter, catalogModelIdsMatch, modelIdsMatch } from "@pi-desktop/shared";
 
 import {
@@ -831,6 +832,69 @@ test("the application loads the bundled release snapshot without network access"
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
+});
+
+test("the bundled snapshot maps the latest 0.87.1 model ids to usable metadata", async () => {
+  const catalog = new ModelsDevCatalog({
+    catalogPath: fileURLToPath(new URL("../resources/models.dev/api.json", import.meta.url)),
+  });
+  assert.equal(await catalog.ensureLoaded(), true);
+
+  const cases = [
+    {
+      vendorKey: "openai-codex",
+      baseUrl: "https://chatgpt.com/backend-api",
+      modelId: "gpt-6-sol",
+      contextWindow: 1_050_000,
+      maxTokens: 128_000,
+      thinkingLevels: ["off", "low", "medium", "high", "xhigh", "max"],
+    },
+    {
+      vendorKey: "openai-codex",
+      baseUrl: "https://chatgpt.com/backend-api",
+      modelId: "gpt-6-luna",
+      contextWindow: 1_050_000,
+      maxTokens: 128_000,
+      thinkingLevels: ["off", "low", "medium", "high", "xhigh", "max"],
+    },
+    {
+      vendorKey: "anthropic",
+      baseUrl: "https://api.anthropic.com",
+      modelId: "claude-opus-5-5",
+      contextWindow: 1_000_000,
+      maxTokens: 128_000,
+      thinkingLevels: ["low", "medium", "high", "xhigh", "max"],
+    },
+    {
+      vendorKey: "xai",
+      baseUrl: "https://api.x.ai/v1",
+      modelId: "grok-4.7",
+      contextWindow: 500_000,
+      maxTokens: 500_000,
+      thinkingLevels: ["low", "medium", "high", "xhigh"],
+    },
+  ];
+
+  for (const expected of cases) {
+    const model = catalog.findModel(expected);
+    assert.ok(model, `${expected.vendorKey}/${expected.modelId} must be in the snapshot`);
+    assert.equal(model.reasoning, true);
+    assert.deepEqual(model.thinkingLevels, expected.thinkingLevels);
+    assert.deepEqual(model.modalities.input, ["text", "image", "pdf"]);
+    const config = modelConfigFromModelsDev(model, expected.baseUrl);
+    assert.equal(config.contextWindow, expected.contextWindow);
+    assert.equal(config.maxTokens, expected.maxTokens);
+    assert.deepEqual(config.input, ["text", "image"]);
+  }
+
+  const copilotClaude = catalog.findModel({
+    vendorKey: "github-copilot",
+    baseUrl: "https://api.individual.githubcopilot.com",
+    modelId: "claude-opus-5.5",
+  });
+  assert.ok(copilotClaude, "GitHub Copilot must include Claude Opus 5.5");
+  assert.equal(copilotClaude.reasoning, true);
+  assert.equal(copilotClaude.limit.context, 1_000_000);
 });
 
 test("concurrent catalog reads share the bundled snapshot load", async () => {
