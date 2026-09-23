@@ -63,13 +63,17 @@ descriptions. The model calls the local `ToolSearch` tool with an exact name or
 capability query; the matching schemas become available on the next model turn.
 At the beginning of every new user prompt, the sidecar clears the in-memory
 deferred set and restores only successful activation evidence from the effective
-session context: `addedToolNames` on successful `ToolSearch` results and the
-names of successful deferred-tool results. Failed rows, interrupted or missing
-result placeholders, and assistant/user prose are ignored. Restored names must
-still be in the current mode's deferred catalog. The host permission,
+session context: `details.activated`, legacy or current `addedToolNames`, and
+`details.matches` on successful `ToolSearch` results, plus the names of
+successful deferred-tool results. Unused activations stay restored while that
+evidence remains. Failed rows, interrupted or missing result placeholders, and
+assistant/user prose are ignored. Restored names must still be in the current
+mode's deferred catalog. Persistence converts `activated` into `addedToolNames`
+so transcript restore matches the live producer. The host permission,
 workspace/scratch containment, timeout, and audit rules do not change when a
 tool is loaded. `ToolSearch` itself never executes a workspace operation and
 never bypasses host-core policy.
+
 
 ## 3. Common Tool Constraints
 

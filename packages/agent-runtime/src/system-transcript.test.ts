@@ -13,12 +13,15 @@ import {
 } from "@earendil-works/pi-ai";
 import { estimateContextTokens as estimateTranscriptTokens } from "@earendil-works/pi-ai/utils/estimate";
 import {
+  appendSystemMessage,
   initialSystemTranscript,
+  projectDynamicSystemMessages,
   rebuildSystemTranscript,
   replaceSystemPrompt,
   syncSystemTools,
   systemPromptContent,
 } from "./system-transcript.js";
+
 
 const read: Tool = { name: "Read", description: "Read text", parameters: Type.Object({ path: Type.String() }) };
 const edit: Tool = { ...read, name: "Edit", description: "Edit text" };
@@ -52,22 +55,110 @@ describe("system transcript helpers", () => {
   it("replays sections and tool removals without giving an unchanged prefix a new timestamp", () => {
     const previous = [initial, delta, assistant, user];
     const rebuilt = rebuildSystemTranscript(previous, [assistant, user]);
+    expect(rebuilt).toBe(previous);
     expect(getCurrentSystemPrompt(rebuilt)).toBe(getCurrentSystemPrompt(previous));
-    expect(rebuilt[0]).toMatchObject({
-      content: "Base instructions\n\nAdditional instructions", timestamp: 1_500,
-      sections: { rules: "Updated rules" }, toolsAdded: [read],
-    });
     expect(getCurrentSystemMessage(rebuilt)?.sections).not.toHaveProperty("obsolete");
     expect(getCurrentTools(rebuilt)).toEqual([read]);
     expect(estimateContextTokens(rebuilt).usageTokens).toBe(1_000);
     expect(rebuildSystemTranscript(rebuilt, [assistant, user])[0]).toBe(rebuilt[0]);
   });
 
-  it("does not resurrect usage predating a folded system delta", () => {
+  it("keeps trailing system appends in place when the conversation grows", () => {
+    const appended = appendSystemMessage([initial, assistant], "Reusable subagent sessions");
+    const nextUser: AgentMessage = { role: "user", content: "next", timestamp: 3_000 };
+    const rebuilt = rebuildSystemTranscript(appended, [assistant, nextUser]);
+    expect(rebuilt[0]).toBe(initial);
+    expect(rebuilt.at(-2)).toMatchObject({ role: "system", content: "Reusable subagent sessions" });
+    expect(rebuilt.at(-1)).toBe(nextUser);
+  });
+
+  it("folds system state in front of a rewritten conversation without resurrecting predating usage", () => {
     const newer = { ...delta, timestamp: 3_000 };
-    const rebuilt = rebuildSystemTranscript([initial, assistant, newer], [assistant]);
+    const rewritten = { ...assistant, content: [{ type: "text" as const, text: "Rewritten history" }] };
+    const rebuilt = rebuildSystemTranscript([initial, assistant, newer], [rewritten]);
     expect(rebuilt[0]?.timestamp).toBe(3_000);
     expect(estimateContextTokens(rebuilt).lastUsageIndex).toBeNull();
+  });
+
+  it("appends dynamic system text without rewriting the head system message", () => {
+    const messages = [initial, assistant];
+    const appended = appendSystemMessage(messages, "Current reusable list");
+    expect(appended[0]).toBe(initial);
+    expect(appended[1]).toBe(assistant);
+    expect(appended[2]).toMatchObject({ role: "system", content: "Current reusable list" });
+    expect(appendSystemMessage(appended, "Current reusable list")).toBe(appended);
+    expect(appendSystemMessage(messages, "")).toBe(messages);
+  });
+
+
+  it("preserves dynamic rows when unchanged base instructions are reapplied", () => {
+    const messages = appendSystemMessage([initial, assistant], "Reusable session A");
+    expect(replaceSystemPrompt(messages, "Base instructions")).toBe(messages);
+    expect(systemPromptContent(messages)).toBe("Base instructions");
+  });
+
+  it("retains the current dynamic snapshot when base instructions really change", () => {
+    const first = appendSystemMessage([initial, assistant], "Reusable session A");
+    const latest = appendSystemMessage(first, "No reusable sessions");
+    const changed = replaceSystemPrompt(latest, "New base instructions");
+    expect(getCurrentSystemPrompt(changed)).toContain("No reusable sessions");
+    expect(getCurrentSystemPrompt(changed)).not.toContain("Reusable session A");
+    expect(getCurrentTools(changed)).toEqual([read, edit]);
+  });
+
+  it("keeps recovery nudges removable and only the latest reusable snapshot after compaction", () => {
+    const first = appendSystemMessage([initial, assistant], "Reusable session A");
+    const latest = appendSystemMessage(first, "No reusable sessions");
+    const nudged = appendSystemMessage(latest, "One-shot recovery nudge", "transient");
+    const nudge = nudged.at(-1);
+    const compacted: AgentMessage = { role: "user", content: "Compacted history", timestamp: 9_000 };
+    const rebuilt = rebuildSystemTranscript(nudged, [compacted]);
+    expect(rebuilt).toContain(nudge);
+    const cleaned = rebuilt.filter((message) => message !== nudge);
+    expect(getCurrentSystemPrompt(cleaned)).not.toContain("One-shot recovery nudge");
+    expect(getCurrentSystemPrompt(cleaned)).not.toContain("Reusable session A");
+    expect(getCurrentSystemPrompt(cleaned)).toContain("No reusable sessions");
+    expect(getCurrentTools(cleaned)).toEqual([read, edit]);
+  });
+
+  it("preserves positions when an unchanged checkpoint projection reallocates summary messages", () => {
+    const summary: AgentMessage = { role: "user", content: "Same checkpoint summary", timestamp: 500 };
+    const previous = [...appendSystemMessage([initial, summary], "Reusable session A"), assistant];
+    const rebuilt = rebuildSystemTranscript(previous, [{ ...summary }, assistant, user]);
+    expect(rebuilt.slice(0, previous.length)).toEqual(previous);
+    expect(rebuilt[1]).toBe(summary);
+    expect(rebuildSystemTranscript(rebuilt, [{ ...summary }, assistant, user])).toBe(rebuilt);
+  });
+
+  it("projects only owned dynamic rows as trailing context before provider system folding", () => {
+    const previous = [initial, assistant];
+    const appended = appendSystemMessage(previous, "Reusable session A");
+    const projected = projectDynamicSystemMessages(appended);
+    expect(projected.slice(0, previous.length)).toEqual(previous);
+    expect(projected.at(-1)).toMatchObject({ role: "user", content: "<runtime-context>\nReusable session A\n</runtime-context>" });
+    expect(getCurrentSystemPrompt(projected)).toBe(getCurrentSystemPrompt(previous));
+    expect(getCurrentTools(projected)).toEqual(getCurrentTools(previous));
+  });
+
+  it("defers runtime context until all parallel tool results arrive", () => {
+    const call: AssistantMessage = { ...assistant, content: [
+      { type: "toolCall", id: "task-a", name: "Task", arguments: {} },
+      { type: "toolCall", id: "task-b", name: "Task", arguments: {} },
+    ] };
+    const result = (id: string): AgentMessage => ({
+      role: "toolResult", toolCallId: id, toolName: "Task", content: [{ type: "text", text: "done" }],
+      isError: false, timestamp: 3_000,
+    });
+    const first = appendSystemMessage([initial, call], "Snapshot A");
+    expect(projectDynamicSystemMessages(first)).toEqual([initial, call]);
+    const resultA = result("task-a");
+    const second = appendSystemMessage([...first, resultA], "Snapshot B");
+    const resultB = result("task-b");
+    const projected = projectDynamicSystemMessages([...second, resultB]);
+    expect(projected.slice(0, 4)).toEqual([initial, call, resultA, resultB]);
+    expect(projected.slice(4).map((message) => message.role)).toEqual(["user", "user"]);
+    expect(projected[4]).toMatchObject({ content: "<runtime-context>\nSnapshot A\n</runtime-context>" });
+    expect(projected[5]).toMatchObject({ content: "<runtime-context>\nSnapshot B\n</runtime-context>" });
   });
 
   it("keeps a complete recovery transcript and its deltas in place", () => {
@@ -177,12 +268,12 @@ describe("system transcript helpers", () => {
       },
     });
     agent.state.messages = syncSystemTools(rebuildSystemTranscript(agent.state.messages, [user]), [tool]);
-    const prefix = agent.state.messages[0];
+    const systems = agent.state.messages.filter((message) => message.role === "system");
     await agent.continue();
     expect(agent.state.errorMessage).toBeUndefined();
     expect(requests).toHaveLength(1);
-    expect(requests[0]?.filter((message) => message.role === "system")).toEqual([prefix]);
+    expect(requests[0]?.filter((message) => message.role === "system")).toEqual(systems);
     expect(getCurrentTools(requests[0]!)).toEqual([toToolDeclaration(tool)]);
-    expect(agent.state.messages.filter((message) => message.role === "system")).toEqual([prefix]);
+    expect(agent.state.messages.filter((message) => message.role === "system")).toEqual(systems);
   });
 });

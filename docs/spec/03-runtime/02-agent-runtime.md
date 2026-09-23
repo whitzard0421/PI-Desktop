@@ -992,8 +992,13 @@ ids when there are any.
 The parent discovers reusable chains through the system prompt, which lists
 each chain's latest `delegationId`, its objective, and up to
 `MAX_RESUMABLE_LISTED_FILES` (8) of the files it read (with a `(+N more)`
-suffix past that). The list is recomposed when a delegation settles, around the
-existing prompt sections. A resumed run is an ordinary delegation for
+suffix past that). When a delegation settles or the parent resumes, the
+current list is delivered as append-only runtime context after the already
+emitted request prefix; it does not rewrite the head system prompt or prior
+history. One-shot recovery nudges use the same pattern. Internal system rows
+are projected to user-role runtime-context messages before provider
+serialization, preventing adapters from folding them into the head prompt.
+A resumed run is an ordinary delegation for
 `MAX_SUBAGENT_CONCURRENCY`, `TaskWait`, `TaskList`, `TaskStop`, and lifecycle
 snapshots. The immediate `Task` result and the lifecycle details add
 `resumedFrom` for audit; the transcript renders a chain as one continuous
@@ -1332,23 +1337,27 @@ one-line descriptions appear in an `# On-demand tools` catalog; parameter
 schemas do not. The catalog is bounded so a plugin with many tools cannot
 recreate the original prompt bloat.
 The model calls `ToolSearch` with an exact name or a short capability query.
-The sidecar activates up to four matches, returns their names through
-pi-agent-core's `addedToolNames`, and rebuilds the next-turn context with those
-schemas. Providers with native deferred-tool search receive the definitions at
-that load point; other providers receive the active definitions normally.
+The sidecar activates up to four matches, returns their names through both
+`details.activated` and pi-agent-core's `addedToolNames`, and rebuilds the
+next-turn context with those schemas. Providers with native deferred-tool
+search receive the definitions at that load point; other providers receive
+the active definitions normally.
 
 At the start of each new user prompt, the sidecar clears the in-memory deferred
 activation set and rebuilds it from the effective context. Successful
-`ToolSearch` results contribute their `addedToolNames`; successful results from
-deferred tools contribute that tool's name. Only names still present in the
-current mode's deferred catalog are restored. Failed rows, interrupted or
+`ToolSearch` results contribute `details.activated`, legacy or current
+`addedToolNames`, and `details.matches`; successful results from deferred
+tools contribute that tool's name. Unused activations remain available while
+that evidence stays in context. Only names still present in the current
+mode's deferred catalog are restored. Failed rows, interrupted or
 missing-result placeholders, and assistant/user prose never activate a tool.
 The tool registry, host permission path, tool timeout, and workspace containment
 rules remain unchanged. `ToolSearch` is local to the sidecar and does not cross
-the host RPC boundary. Its activation marker is retained in the persisted tool
-result, so a runtime restart or a new prompt can reuse an eligible capability
-while that evidence remains in the effective context; a fresh search is still
-required after the evidence is compacted away or otherwise absent.
+the host RPC boundary. Persistence converts `activated` into `addedToolNames`
+on restore so a runtime restart or a new prompt can reuse an eligible
+capability while that evidence remains in the effective context; a fresh search
+is still required after the evidence is compacted away or otherwise absent.
+
 
 For user-visible HTML deliverables, the default system prompt asks the agent to
 activate `BrowserPreview` once after creating the page or making its first

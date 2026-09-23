@@ -155,10 +155,18 @@ counted and not listed.
 
 ### 9. The parent sees a resumable list in its system prompt
 
-Each prompt composes the current resumable chains into the parent's system
-prompt: agent name, delegation id, the one-line objective, and the files the
+Each prompt exposes the current resumable chains to the parent as system
+text: agent name, delegation id, the one-line objective, and the files the
 chain has read (capped at 8, truncated). Only settled, in-budget chains appear —
 a running chain is never listed, so the parent is not lured into resuming one.
+When the list changes, the runtime appends the current block after the already
+emitted transcript instead of rewriting the head system prompt. Internally,
+these are runtime-owned system rows. Before provider serialization they become
+trailing runtime-context messages, because provider adapters otherwise fold
+all system content into the head. Genuine context rewrites retain only the
+current reusable snapshot; transient recovery rows remain removable.
+Updates produced inside a tool batch are projected only after all matching
+results, so synthetic context cannot split a call from its result.
 
 The `resume` parameter's own schema description carries the rule that reuse
 requires the id; prose alone does not resume anything.

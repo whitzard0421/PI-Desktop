@@ -1,6 +1,6 @@
 import { realpathSync } from "node:fs";
 import { createRequire } from "node:module";
-import { join } from "node:path";
+import { join, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { describe, expect, it } from "vitest";
@@ -61,7 +61,7 @@ function packageRoot(packageName: string): string {
     return realpathSync(require.resolve(`${packageName}/package.json`).replace(/[\\/]package\.json$/, ""));
   } catch {
     const entry = fileURLToPath(esmResolve(packageName));
-    const marker = entry.lastIndexOf("/dist/");
+    const marker = entry.lastIndexOf(`${sep}dist${sep}`);
     if (marker < 0) throw new Error(`cannot locate the dist root of ${packageName}`);
     return realpathSync(entry.slice(0, marker));
   }

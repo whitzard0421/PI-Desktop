@@ -321,7 +321,8 @@ describe("system transcript reconstruction", () => {
     expect(agent.state.systemPrompt).toBe(before);
     expect(getCurrentSystemMessage(agent.state.messages)?.sections).toEqual({ rules: "SECTION_MARKER" });
     expect(getCurrentTools(agent.state.messages)).toEqual(tools);
-    expect(estimateTranscriptTokens(agent.state.messages as any).usageTokens).toBe(0);
+    expect(estimateTranscriptTokens(agent.state.messages as any).usageTokens).toBe(2);
+
     await runtime.dispose();
   });
 });
@@ -2692,7 +2693,7 @@ describe("DesktopAgentRuntime plan transitions", () => {
         // The progress assistant is visible in the reused bubble but must be
         // removed before continue() rebuilds the model context.
         expect(agent.state.messages.filter((message: any) => message.role !== "system")).toHaveLength(1);
-        expect(agent.state.messages.at(-1)?.role).toBe("user");
+        expect(agent.state.messages.filter((message: any) => message.role !== "system").at(-1)?.role).toBe("user");
         expect(agent.state.systemPrompt).toContain("<progress_only_recovery>");
       }
       await handleAgentEvent({ type: "agent_start" });
@@ -2781,7 +2782,7 @@ describe("DesktopAgentRuntime plan transitions", () => {
         ];
       } else {
         expect(agent.state.messages.filter((message: any) => message.role !== "system")).toHaveLength(1);
-        expect(agent.state.messages.at(-1)?.role).toBe("user");
+        expect(agent.state.messages.filter((message: any) => message.role !== "system").at(-1)?.role).toBe("user");
         expect(agent.state.systemPrompt).toContain(
           attempts === 2 ? "<progress_only_recovery>" : "<no_output_recovery>",
         );
@@ -8386,6 +8387,62 @@ describe("DesktopAgentRuntime subagents", () => {
   });
 });
 
+describe("DesktopAgentRuntime dynamic system lifecycle", () => {
+  const definition: SubagentDefinition = {
+    name: "explorer", description: "Inspect files", tools: ["Read"], prompt: "Inspect files", source: "builtin",
+  };
+
+  it("keeps dynamic rows in place across repeated projections of one real checkpoint", async () => {
+    const runtime = createRuntime({ subagents: [definition], history: [
+      { id: "old-user", role: "user", content: "Earlier", createdAt: "2026-09-01T00:00:00Z", status: "complete" },
+      { id: "recent-user", role: "user", content: "Continue", createdAt: "2026-09-01T00:00:01Z", status: "complete" },
+    ] });
+    const internal = runtime as any;
+    try {
+      internal.activeCompaction = internal.createCheckpoint(
+        { firstKeptEntryId: "recent-user", tokensBefore: 1000, retainedTail: [] }, "recent-user", "Earlier summary",
+      );
+      internal.rebuiltAgentContext();
+      vi.spyOn(internal.delegationChains, "promptBlock").mockReturnValue("Reusable subagent sessions: fixture");
+      internal.refreshResumablePrompt();
+      const before = [...internal.agent.state.messages];
+      const next = assistantMessage({ content: [{ type: "text", text: "Continued" }] });
+      internal.appendLiveEntry("next-assistant", next);
+      const rebuilt = internal.rebuiltAgentContext().messages;
+      expect(rebuilt.slice(0, before.length)).toEqual(before);
+      expect(rebuilt.at(-1)).toBe(next);
+      expect(internal.rebuiltAgentContext().messages).toEqual(rebuilt);
+      internal.applyProjectInstructions(undefined);
+      expect(internal.agent.state.messages).toEqual(rebuilt);
+    } finally {
+      await runtime.dispose();
+    }
+  });
+
+  it("keeps fallback dynamic state separate from base instructions and transient nudges", async () => {
+    const runtime = createRuntime({ subagents: [definition] });
+    const internal = runtime as any;
+    const agent = internal.agent;
+    internal.agent = { state: { systemPrompt: internal.composeSystemPrompt(), messages: [], tools: [] } };
+    try {
+      vi.spyOn(internal.delegationChains, "promptBlock").mockReturnValue("Reusable subagent sessions: fixture");
+      internal.refreshResumablePrompt();
+      internal.applyProjectInstructions(undefined);
+      internal.refreshResumablePrompt();
+      expect(internal.agent.state.systemPrompt.split("Reusable subagent sessions: fixture")).toHaveLength(2);
+      const nudge = internal.applyTransientSystemNudge("One-shot fallback nudge");
+      expect(internal.agent.state.systemPrompt).toContain("One-shot fallback nudge");
+      internal.applyProjectInstructions(undefined);
+      internal.clearTransientSystemNudge(nudge);
+      expect(internal.agent.state.systemPrompt).not.toContain("One-shot fallback nudge");
+      expect(internal.agent.state.systemPrompt.split("Reusable subagent sessions: fixture")).toHaveLength(2);
+    } finally {
+      internal.agent = agent;
+      await runtime.dispose();
+    }
+  });
+});
+
 describe("DesktopAgentRuntime deferred tool restore (#225)", () => {
   const now = () => new Date().toISOString();
   const searchRow = (overrides: Partial<UiMessage> = {}): UiMessage => ({
@@ -8479,6 +8536,140 @@ describe("DesktopAgentRuntime deferred tool restore (#225)", () => {
     runtime.setMode("agent");
 
     expect(hasTool(runtime, "BrowserPreview")).toBe(true);
+    await runtime.dispose();
+  });
+
+  it("keeps an unused ToolSearch activation from details.activated alone", async () => {
+    const runtime = createRuntime({
+      history: [
+        assistantRow,
+        searchRow({
+          toolResult: {
+            content: [{ type: "text", text: "Activated on-demand tools: BrowserPreview." }],
+            details: { query: "BrowserPreview", matches: ["BrowserPreview"], activated: ["BrowserPreview"] },
+          },
+        }),
+      ],
+    });
+    (runtime as any).resetDeferredToolsForPrompt();
+    expect(hasTool(runtime, "BrowserPreview")).toBe(true);
+    await runtime.dispose();
+  });
+
+  it.each(["activated", "addedToolNames"])("retains a partially used %s activation set only while its evidence is effective", async (field) => {
+    const runtime = createRuntime({
+      history: [
+        assistantRow,
+        searchRow({ toolResult: {
+          content: [{ type: "text", text: "Activated BrowserPreview and PluginCheck." }],
+          details: { [field]: ["BrowserPreview", "PluginCheck"] },
+        } }),
+        {
+          id: "preview-result", role: "tool", content: "", createdAt: now(), status: "complete",
+          toolName: "BrowserPreview", toolCallId: "preview-call", toolStatus: "success",
+          toolArgs: {}, toolResult: { content: [{ type: "text", text: "Opened preview." }] },
+        },
+        { id: "recent-user", role: "user", content: "Continue.", createdAt: now(), status: "complete" },
+      ],
+    });
+    try {
+      (runtime as any).resetDeferredToolsForPrompt();
+      expect(hasTool(runtime, "BrowserPreview")).toBe(true);
+      expect(hasTool(runtime, "PluginCheck")).toBe(true);
+      (runtime as any).activeCompaction = (runtime as any).createCheckpoint(
+        { firstKeptEntryId: "recent-user", tokensBefore: 1000, retainedTail: [] },
+        "recent-user", "Older work summarized.",
+      );
+      (runtime as any).resetDeferredToolsForPrompt();
+      expect(hasTool(runtime, "BrowserPreview")).toBe(false);
+      expect(hasTool(runtime, "PluginCheck")).toBe(false);
+    } finally {
+      await runtime.dispose();
+    }
+  });
+
+  it("round-trips activated-only and legacy addedToolNames through transcript restore", async () => {
+    const activatedOnly = createRuntime({
+      history: [
+        assistantRow,
+        searchRow({
+          toolResult: {
+            content: [{ type: "text", text: "Activated BrowserPreview." }],
+            details: { activated: ["BrowserPreview"] },
+          },
+        }),
+      ],
+    });
+    const activatedMessage = (activatedOnly as any).agent.state.messages.find(
+      (message: { role: string }) => message.role === "toolResult",
+    );
+    expect(activatedMessage.details).toMatchObject({
+      activated: ["BrowserPreview"],
+      addedToolNames: ["BrowserPreview"],
+    });
+    expect(activatedMessage.addedToolNames).toEqual(["BrowserPreview"]);
+    (activatedOnly as any).resetDeferredToolsForPrompt();
+    expect(hasTool(activatedOnly, "BrowserPreview")).toBe(true);
+
+    const legacy = createRuntime({
+      history: [
+        assistantRow,
+        searchRow({
+          toolResult: {
+            content: [{ type: "text", text: "Activated BrowserPreview." }],
+            addedToolNames: ["BrowserPreview"],
+          },
+        }),
+      ],
+    });
+    const legacyMessage = (legacy as any).agent.state.messages.find(
+      (message: { role: string }) => message.role === "toolResult",
+    );
+    expect(legacyMessage.details.addedToolNames).toEqual(["BrowserPreview"]);
+    (legacy as any).resetDeferredToolsForPrompt();
+    expect(hasTool(legacy, "BrowserPreview")).toBe(true);
+    await activatedOnly.dispose();
+    await legacy.dispose();
+  });
+
+  it("emits addedToolNames from ToolSearch and restores a live unused activation", async () => {
+    const runtime = createRuntime();
+    const search = (runtime as any).agent.state.tools.find((tool: { name: string }) => tool.name === "ToolSearch");
+    const result = await search.execute("search-live", { query: "BrowserPreview" });
+    expect(result.details.activated).toEqual(["BrowserPreview"]);
+    expect(result.addedToolNames).toEqual(["BrowserPreview"]);
+    (runtime as any).appendLiveEntry("search-live", {
+      role: "toolResult",
+      toolCallId: "search-live",
+      toolName: "ToolSearch",
+      content: result.content,
+      details: result.details,
+      isError: false,
+      timestamp: Date.now(),
+    });
+    (runtime as any).resetDeferredToolsForPrompt();
+    expect(hasTool(runtime, "BrowserPreview")).toBe(true);
+    await runtime.dispose();
+  });
+
+  it("ignores invalid names, failed rows, and tools outside the current catalog", async () => {
+    const runtime = createRuntime({
+      history: [
+        assistantRow,
+        searchRow({
+          toolResult: {
+            content: [{ type: "text", text: "Activated on-demand tools: MissingTool." }],
+            details: { activated: ["MissingTool", ""], matches: [1, "MissingTool"] },
+          },
+        }),
+      ],
+    });
+    (runtime as any).resetDeferredToolsForPrompt();
+    expect(hasTool(runtime, "BrowserPreview")).toBe(false);
+    expect(hasTool(runtime, "MissingTool")).toBe(false);
+    runtime.setMode("plan");
+    (runtime as any).resetDeferredToolsForPrompt();
+    expect(hasTool(runtime, "Write")).toBe(false);
     await runtime.dispose();
   });
 });
@@ -9286,7 +9477,7 @@ describe("compaction fallback retention (#827)", () => {
       true,
     );
 
-    const checkpoint = appendedCheckpoint(host);
+    appendedCheckpoint(host);
     const replayed = replayedMessages(runtime);
     expect(replayed.map((message: any) => message.role)).toEqual([
       "compactionSummary",

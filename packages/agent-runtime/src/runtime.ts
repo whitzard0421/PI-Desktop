@@ -130,12 +130,15 @@ import {
 import { withExplicitRequired } from "./tool-schema.js";
 import { buildSessionContext } from "./session-context.js";
 import {
+  appendSystemMessage,
   initialSystemTranscript,
+  projectDynamicSystemMessages,
   rebuildSystemTranscript,
   replaceSystemPrompt,
   syncSystemTools,
   systemPromptContent,
 } from "./system-transcript.js";
+
 import {
   dedupeToolCallMessages,
   reportDuplicateToolCallDrop,
@@ -372,6 +375,31 @@ function isMissingToolResultPlaceholder(
     content[0].text === MISSING_TOOL_RESULT_PLACEHOLDER
   );
 }
+
+function stringNameList(value: unknown): string[] {
+  return Array.isArray(value)
+    ? value.filter((name): name is string => typeof name === "string" && name.length > 0)
+    : [];
+}
+
+function uniqueToolNames(...groups: readonly unknown[]): string[] {
+  return [...new Set(groups.flatMap(stringNameList))];
+}
+
+function toolSearchActivationNames(message: ToolResultMessage): string[] {
+  const details = isRecord(message.details) ? message.details : undefined;
+  return uniqueToolNames(
+    details?.addedToolNames,
+    details?.activated,
+    details?.matches,
+    (message as { addedToolNames?: unknown }).addedToolNames,
+  );
+}
+
+
+const NO_RESUMABLE_SESSIONS_PROMPT =
+  "No reusable subagent sessions in this conversation.";
+
 
 /** Narrow view of the `tool_end` agent event; the envelope carries the rest. */
 type ToolEndEvent = {
@@ -1434,14 +1462,12 @@ function toolResultFromUi(
   const rawRecord: Record<string, unknown> | undefined = isRecord(raw)
     ? raw
     : undefined;
-  const rawAddedToolNames = rawRecord?.addedToolNames;
-  const addedToolNames =
-    Array.isArray(rawAddedToolNames)
-      ? rawAddedToolNames.filter(
-          (name: unknown): name is string =>
-            typeof name === "string" && name.length > 0,
-        )
-      : [];
+  const detailsObject = toJsonObject(rawRecord?.details);
+  const addedToolNames = uniqueToolNames(
+    rawRecord?.addedToolNames,
+    detailsObject.addedToolNames,
+    detailsObject.activated,
+  );
   if (blocks.length === 0) {
     blocks.push({
       type: "text",
@@ -1458,11 +1484,12 @@ function toolResultFromUi(
     ...(toJsonValue(rawRecord?.details) !== undefined || addedToolNames.length > 0
       ? {
           details: {
-            ...toJsonObject(rawRecord?.details),
+            ...detailsObject,
             ...(addedToolNames.length > 0 ? { addedToolNames } : {}),
           },
         }
       : {}),
+    ...(addedToolNames.length > 0 ? { addedToolNames } : {}),
     isError:
       interrupted ||
       m.toolStatus === "error" ||
@@ -1581,9 +1608,10 @@ export class DesktopAgentRuntime {
     string,
     { name: string; args: unknown }
   >();
-  /** The prompt this runtime composed last, so a mid-turn refresh can tell its
-   * own prompt from a transient variant it must not clobber. */
-  private composedSystemPrompt?: string;
+  /** Last resumable-list block appended to the live transcript. */
+  private lastEmittedResumableBlock = "";
+  private fallbackSystemPrompt?: string;
+  private fallbackDynamicSystemContent = new Map<"resumable" | "transient", string>();
   /** Set when a refresh was skipped because a transient prompt variant owned the
    * live prompt; that variant's cleanup applies it once the prompt is restored. */
   private resumablePromptStale = false;
@@ -1991,7 +2019,7 @@ Delegation rules:
       // guaranteed for both a rebuilt context and one that grew in this process.
       convertToLlm: (messages) =>
         alignRetainedReasoningIdentity(
-          convertToLlm(this.dropDuplicateToolCalls(messages)),
+          convertToLlm(projectDynamicSystemMessages(this.dropDuplicateToolCalls(messages))),
           this.reasoningReplayIdentity(),
         ),
       prepareNextTurnWithContext: (context, signal) =>
@@ -2089,7 +2117,9 @@ Delegation rules:
 
   private setAgentSystemPrompt(prompt: string): void {
     if (!this.agentUsesTranscriptSystemMessages()) {
-      (this.agent.state as unknown as { systemPrompt: string }).systemPrompt = prompt;
+      this.fallbackSystemPrompt = prompt;
+      (this.agent.state as unknown as { systemPrompt: string }).systemPrompt =
+        [prompt, ...this.fallbackDynamicSystemContent.values()].filter(Boolean).join("\n\n");
       return;
     }
     this.agent.state.messages = replaceSystemPrompt(this.agent.state.messages, prompt);
@@ -2116,19 +2146,15 @@ Delegation rules:
   private agentSystemPromptContent(): string {
     return this.agentUsesTranscriptSystemMessages()
       ? systemPromptContent(this.agent.state.messages)
-      : this.agent.state.systemPrompt;
+      : this.fallbackSystemPrompt ?? this.agent.state.systemPrompt;
   }
 
   private composeSystemPrompt(): string {
     const projectPrompt = projectInstructionsPrompt(this.projectInstructions);
     const memoryPrompt = projectMemoryPrompt(this.projectMemory);
     const optionalToolsPrompt = this.optionalToolsPrompt();
-    const resumablePrompt =
-      this.subagents.length > 0
-        ? this.delegationChains.promptBlock({
-            runningDelegationIds: this.runningDelegationIds(),
-          })
-        : "";
+    // The resumable list is delivered append-only (see refreshResumablePrompt)
+    // so a settlement cannot rewrite the head system message already emitted.
     const composed = composeModeSystemPrompt(
       this.mode,
       [
@@ -2137,33 +2163,41 @@ Delegation rules:
         ...(optionalToolsPrompt ? [optionalToolsPrompt] : []),
         ...(projectPrompt ? [projectPrompt] : []),
         ...(memoryPrompt ? [memoryPrompt] : []),
-        ...(resumablePrompt ? [resumablePrompt] : []),
       ].join("\n\n"),
     );
-    this.composedSystemPrompt = composed;
     return composed;
   }
 
   /**
-   * The resumable list changes when a delegation settles, so the prompt the
-   * parent reads on its next turn reflects it. Recomposing is only worth it
-   * when subagents exist at all, and only while the live prompt is still the
-   * one this runtime composed: a transient variant (the delegation nudge) owns
-   * it otherwise, and the next turn recomposes anyway.
+   * The resumable list changes when a delegation settles. Append the current
+   * block after the already-emitted transcript instead of rewriting the head
+   * system prompt, so the previous request prefix stays intact. A one-shot
+   * recovery nudge owns the live prompt while it runs; its cleanup applies a
+   * deferred refresh afterwards.
    */
   private refreshResumablePrompt(): void {
     if (this.subagents.length === 0) return;
     if (!this.agent) return;
-    if (this.composedSystemPrompt === undefined) return;
-    if (this.agentSystemPromptContent() !== this.composedSystemPrompt) {
-      // A transient variant (the delegation nudge) owns the live prompt. Its
-      // own cleanup restores the composed text, and applies this refresh then,
-      // so a chain that settled mid-nudge is still listed on the next turn.
+    if (this.silentTurnRerunInProgress || this.progressTurnRerunInProgress) {
       this.resumablePromptStale = true;
       return;
     }
-    this.setAgentSystemPrompt(this.composeSystemPrompt());
+    const block = this.delegationChains.promptBlock({
+      runningDelegationIds: this.runningDelegationIds(),
+    });
+    if (block === this.lastEmittedResumableBlock) return;
+    if (!block && !this.lastEmittedResumableBlock) return;
+    const content = block || NO_RESUMABLE_SESSIONS_PROMPT;
+    if (!this.agentUsesTranscriptSystemMessages()) {
+      this.fallbackDynamicSystemContent.set("resumable", content);
+      this.setAgentSystemPrompt(this.composeSystemPrompt());
+      this.lastEmittedResumableBlock = block;
+      return;
+    }
+    this.agent.state.messages = appendSystemMessage(this.agent.state.messages, content);
+    this.lastEmittedResumableBlock = block;
   }
+
 
   /** Apply a resumable-list refresh that a transient prompt variant deferred. */
   private applyPendingResumablePrompt(): void {
@@ -2171,6 +2205,29 @@ Delegation rules:
     this.resumablePromptStale = false;
     this.refreshResumablePrompt();
   }
+
+  /** One-shot recovery text as a trailing system message, not a head rewrite. */
+  private applyTransientSystemNudge(nudge: string): AgentMessage | undefined {
+    if (!this.agentUsesTranscriptSystemMessages()) {
+      this.fallbackDynamicSystemContent.set("transient", nudge);
+      this.setAgentSystemPrompt(this.agentSystemPromptContent());
+      return undefined;
+    }
+    const nudged = appendSystemMessage(this.agent.state.messages, nudge, "transient");
+    const row = nudged.at(-1);
+    this.agent.state.messages = nudged;
+    return row;
+  }
+
+  private clearTransientSystemNudge(row: AgentMessage | undefined): void {
+    if (row) {
+      this.agent.state.messages = this.agent.state.messages.filter((message) => message !== row);
+      return;
+    }
+    this.fallbackDynamicSystemContent.delete("transient");
+    this.setAgentSystemPrompt(this.agentSystemPromptContent());
+  }
+
 
   /**
    * Host failures and mutation-failure termination are recorded per tool-call
@@ -3655,7 +3712,9 @@ Delegation rules:
         return {
           content: [{ type: "text", text }],
           details: { query, matches, activated },
+          ...(activated.length > 0 ? { addedToolNames: activated } : {}),
         };
+
       },
     };
   }
@@ -4339,6 +4398,7 @@ Delegation rules:
           ...(modelChangedFrom ? { modelChangedFrom } : {}),
         };
         this.delegations.set(delegationId, record);
+        this.refreshResumablePrompt();
         const scopedTools = this.scopeDelegateTools(tools, definition);
         new SubagentRun({
           definition,
@@ -5097,9 +5157,11 @@ Delegation rules:
    * can still see. The context keeps every ToolSearch result that announced
    * "Activated on-demand tools: X" and every result X itself produced, so
    * starting a turn with an empty set while those rows remain leaves the
-   * model calling tools that are missing from the schema (#225). Only
+   * model calling tools that are missing from the schema (#225, #913). Only
    * successful results count, and only for names still in the deferred
    * catalog, which `rebuildToolCatalog` already limits to the current mode.
+   * ToolSearch rows accept `details.activated`, legacy/current
+   * `addedToolNames`, and `details.matches`.
    */
   private restoreDeferredToolsFromContext(): void {
     if (this.deferredToolNames.size === 0) return;
@@ -5109,9 +5171,7 @@ Delegation rules:
       if (isMissingToolResultPlaceholder(message.content)) continue;
       const names =
         message.toolName === TOOL_SEARCH_NAME
-          ? (isRecord(message.details) && Array.isArray(message.details.addedToolNames)
-              ? message.details.addedToolNames.filter((name): name is string => typeof name === "string")
-              : [])
+          ? toolSearchActivationNames(message)
           : [message.toolName];
       for (const name of names) {
         if (this.deferredToolNames.has(name)) {
@@ -5719,9 +5779,7 @@ Delegation rules:
     while (messages.at(-1)?.role === "assistant") messages.pop();
     this.setAgentMessages(messages);
 
-    const promptBefore = this.agentSystemPromptContent();
-    const promptWithNudge = `${promptBefore}\n\n${SILENT_TURN_NUDGE}`;
-    this.setAgentSystemPrompt(promptWithNudge);
+    const nudgeRow = this.applyTransientSystemNudge(SILENT_TURN_NUDGE);
     this.silentTurnRerunInProgress = true;
     this.requestStartedAt = Date.now();
     this.setAgentActivity({ phase: "recovering", since: Date.now() });
@@ -5730,11 +5788,9 @@ Delegation rules:
       await this.agent.continue();
       await this.waitForIdleAndSteering();
     } finally {
-      if (this.agentSystemPromptContent() === promptWithNudge) {
-        this.setAgentSystemPrompt(promptBefore);
-      }
-      this.applyPendingResumablePrompt();
+      this.clearTransientSystemNudge(nudgeRow);
       this.silentTurnRerunInProgress = false;
+      this.applyPendingResumablePrompt();
       this.suppressSilentTurnRunEnd = false;
     }
   }
@@ -5827,9 +5883,7 @@ Delegation rules:
     while (messages.at(-1)?.role === "assistant") messages.pop();
     this.setAgentMessages(messages);
 
-    const promptBefore = this.agentSystemPromptContent();
-    const promptWithNudge = `${promptBefore}\n\n${PROGRESS_TURN_NUDGE}`;
-    this.setAgentSystemPrompt(promptWithNudge);
+    const nudgeRow = this.applyTransientSystemNudge(PROGRESS_TURN_NUDGE);
     this.progressTurnRerunInProgress = true;
     this.requestStartedAt = Date.now();
     this.setAgentActivity({ phase: "recovering", since: Date.now() });
@@ -5839,11 +5893,9 @@ Delegation rules:
       await this.agent.continue();
       await this.waitForIdleAndSteering();
     } finally {
-      if (this.agentSystemPromptContent() === promptWithNudge) {
-        this.setAgentSystemPrompt(promptBefore);
-      }
-      this.applyPendingResumablePrompt();
+      this.clearTransientSystemNudge(nudgeRow);
       this.progressTurnRerunInProgress = false;
+      this.applyPendingResumablePrompt();
       this.suppressProgressTurnRunEnd = false;
     }
   }

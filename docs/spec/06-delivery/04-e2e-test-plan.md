@@ -1075,16 +1075,42 @@ identify the platform validation still needed.
   through live reload while the page is refined. Generated, test-only, and
   non-visual HTML files do not trigger a preview call. At the second prompt,
   successful activation markers still in the effective context may restore the
-  matching deferred schemas in the first request; failed, interrupted, and
-  missing-result rows do not. Catalog and mode changes also prevent restoration.
-  No host permission or workspace escape is granted by restoration.
+  matching deferred schemas in the first request, including unused
+  `details.activated` markers and legacy `addedToolNames`; failed, interrupted,
+  and missing-result rows do not. Catalog and mode changes also prevent
+  restoration. No host permission or workspace escape is granted by restoration.
 - **Specs linked**: `03-runtime/02-agent-runtime.md` §7.1,
   `03-runtime/03-tools-and-permissions.md` §2.1, ADR 0048, ADR 0225,
-  `08-meta/decisions-log.md` (D185, D400)
+  `08-meta/decisions-log.md` (D185, D400, D600)
 - **Acceptance**: C (first turn and stream) + E (tool execution)
 - **Milestone**: M5
-- **Status**: Unit-covered (`agent-runtime` deferred-tool tests); live-model
-  request capture and full Electron journey pending
+- **Status**: Unit-covered (`agent-runtime` deferred-tool tests and
+  `request-prefix-stability.test.ts`); live-model Electron journey pending
+
+#### E2E-008f: Provider request prefix stays stable across user turns and child completion
+
+- **Preconditions**: Agent session; OpenAI-compatible Responses provider with
+  request capture (local mock is enough); deferred `ToolSearch` available;
+  subagent catalog non-empty.
+- **Steps**: 1) Activate an on-demand tool via `ToolSearch` without calling it,
+  then send a new user prompt. 2) Capture the serialized Responses body.
+  3) Send another user prompt and capture again. 4) Start a `Task`, let the
+  child settle, send a further user prompt, and capture that body. 5) Repeat
+  after restoring a transcript that stored only `details.activated`.
+- **Expected**: Each later request keeps the previously emitted
+  instructions/system, tool-declaration, and history prefix byte-identical.
+  Current resumable-list text and recovery nudges appear as append-only
+  runtime context after that prefix. Provider system-message folding must not
+  move this context back into the head prompt. Unused successful activations remain in the
+  tool list. The test asserts serialization equality, not provider cache-hit
+  counters. `Task` / `TaskWait` / notifications / resume keep existing
+  role, identity, error, and cancel semantics.
+- **Specs linked**: `03-runtime/02-agent-runtime.md` §5f and §7.1, ADR 0048,
+  ADR 0225, ADR 0279, D400, D600
+- **Acceptance**: C (conversation) + E (tools)
+- **Milestone**: M5
+- **Status**: Unit-covered (`packages/agent-runtime/src/request-prefix-stability.test.ts`);
+  full Electron journey pending
 
 #### E2E-008b: Bundled Browser plugin chrome and CDP
 
