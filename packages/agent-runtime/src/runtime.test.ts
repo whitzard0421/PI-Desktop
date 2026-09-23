@@ -8588,6 +8588,53 @@ describe("DesktopAgentRuntime deferred tool restore (#225)", () => {
     }
   });
 
+  it("prefers canonical activation evidence over divergent historical markers", async () => {
+    const runtime = createRuntime({
+      history: [
+        assistantRow,
+        searchRow({
+          toolResult: {
+            content: [{ type: "text", text: "Activated BrowserPreview." }],
+            addedToolNames: ["PluginScaffold"],
+            details: {
+              addedToolNames: ["BrowserPreview"],
+              activated: ["PluginCheck"],
+              matches: ["PluginPack"],
+            },
+          },
+        }),
+      ],
+    });
+    try {
+      const deferred = (runtime as any).deferredToolNames as Set<string>;
+      for (const name of ["BrowserPreview", "PluginScaffold", "PluginCheck", "PluginPack"]) {
+        expect(deferred.has(name)).toBe(true);
+      }
+      (runtime as any).resetDeferredToolsForPrompt();
+      expect(hasTool(runtime, "BrowserPreview")).toBe(true);
+      expect(hasTool(runtime, "PluginScaffold")).toBe(false);
+      expect(hasTool(runtime, "PluginCheck")).toBe(false);
+      expect(hasTool(runtime, "PluginPack")).toBe(false);
+    } finally {
+      await runtime.dispose();
+    }
+  });
+
+  it("uses ToolSearch matches only when stronger activation evidence is empty", async () => {
+    const runtime = createRuntime({
+      history: [assistantRow, searchRow({ toolResult: {
+        content: [{ type: "text", text: "BrowserPreview is already active." }],
+        details: { addedToolNames: [1, ""], activated: [], matches: ["BrowserPreview"] },
+      } })],
+    });
+    try {
+      (runtime as any).resetDeferredToolsForPrompt();
+      expect(hasTool(runtime, "BrowserPreview")).toBe(true);
+    } finally {
+      await runtime.dispose();
+    }
+  });
+
   it("round-trips activated-only and legacy addedToolNames through transcript restore", async () => {
     const activatedOnly = createRuntime({
       history: [
@@ -8637,6 +8684,7 @@ describe("DesktopAgentRuntime deferred tool restore (#225)", () => {
     const search = (runtime as any).agent.state.tools.find((tool: { name: string }) => tool.name === "ToolSearch");
     const result = await search.execute("search-live", { query: "BrowserPreview" });
     expect(result.details.activated).toEqual(["BrowserPreview"]);
+    expect(result.details.addedToolNames).toEqual(["BrowserPreview"]);
     expect(result.addedToolNames).toEqual(["BrowserPreview"]);
     (runtime as any).appendLiveEntry("search-live", {
       role: "toolResult",

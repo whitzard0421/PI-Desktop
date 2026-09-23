@@ -382,16 +382,30 @@ function stringNameList(value: unknown): string[] {
     : [];
 }
 
-function uniqueToolNames(...groups: readonly unknown[]): string[] {
-  return [...new Set(groups.flatMap(stringNameList))];
+function firstToolNameList(...candidates: readonly unknown[]): string[] {
+  for (const candidate of candidates) {
+    const names = [...new Set(stringNameList(candidate))];
+    if (names.length > 0) return names;
+  }
+  return [];
+}
+
+function toolSearchActivationNamesFrom(
+  details: unknown,
+  legacyAddedToolNames?: unknown,
+): string[] {
+  const record = isRecord(details) ? details : undefined;
+  return firstToolNameList(
+    record?.addedToolNames,
+    record?.activated,
+    legacyAddedToolNames,
+    record?.matches,
+  );
 }
 
 function toolSearchActivationNames(message: ToolResultMessage): string[] {
-  const details = isRecord(message.details) ? message.details : undefined;
-  return uniqueToolNames(
-    details?.addedToolNames,
-    details?.activated,
-    details?.matches,
+  return toolSearchActivationNamesFrom(
+    message.details,
     (message as { addedToolNames?: unknown }).addedToolNames,
   );
 }
@@ -1463,11 +1477,10 @@ function toolResultFromUi(
     ? raw
     : undefined;
   const detailsObject = toJsonObject(rawRecord?.details);
-  const addedToolNames = uniqueToolNames(
-    rawRecord?.addedToolNames,
-    detailsObject.addedToolNames,
-    detailsObject.activated,
-  );
+  const addedToolNames =
+    m.toolName === TOOL_SEARCH_NAME
+      ? toolSearchActivationNamesFrom(rawRecord?.details, rawRecord?.addedToolNames)
+      : [...new Set(stringNameList(rawRecord?.addedToolNames))];
   if (blocks.length === 0) {
     blocks.push({
       type: "text",
@@ -3711,7 +3724,12 @@ Delegation rules:
               : `No matching on-demand tool. Available names: ${availablePreview.join(", ")}${remaining > 0 ? `, and ${remaining} more` : ""}.`;
         return {
           content: [{ type: "text", text }],
-          details: { query, matches, activated },
+          details: {
+            query,
+            matches,
+            activated,
+            ...(activated.length > 0 ? { addedToolNames: activated } : {}),
+          },
           ...(activated.length > 0 ? { addedToolNames: activated } : {}),
         };
 

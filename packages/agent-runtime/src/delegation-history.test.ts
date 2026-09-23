@@ -321,6 +321,53 @@ describe("seedDelegateMessages", () => {
     });
   });
 
+  it("normalizes ToolSearch activation markers for resumed delegate history", () => {
+    const seed = (toolResult: Record<string, unknown>) => seedDelegateMessages({
+      originalTask: "explore",
+      rows: [delegateTool(
+        "search-1",
+        "ToolSearch",
+        { query: "BrowserPreview" },
+        toolResult,
+        "call-1",
+      )],
+      provider: provider(),
+      model: buildProviderModel(provider()),
+      budget: generousBudget(),
+    }).at(-1);
+
+    expect(seed({
+      content: [{ type: "text", text: "Activated BrowserPreview." }],
+      addedToolNames: ["BrowserPreview"],
+      details: { query: "BrowserPreview", activated: [] },
+    })).toMatchObject({
+      role: "toolResult",
+      details: { addedToolNames: ["BrowserPreview"] },
+    });
+    expect(seed({
+      content: [{ type: "text", text: "Activated PluginCheck." }],
+      details: { addedToolNames: [1, ""], activated: ["PluginCheck"] },
+    })).toMatchObject({
+      role: "toolResult",
+      details: { addedToolNames: ["PluginCheck"] },
+    });
+    expect(seed({
+      content: [{ type: "text", text: "PluginPack is already active." }],
+      details: { addedToolNames: [null], activated: [], matches: ["PluginPack"] },
+    })).toMatchObject({
+      role: "toolResult",
+      details: { addedToolNames: ["PluginPack"] },
+    });
+    expect(seed({
+      content: [{ type: "text", text: "Activated Glob." }],
+      addedToolNames: ["BrowserPreview"],
+      details: { addedToolNames: ["Glob"], activated: ["PluginCheck"] },
+    })).toMatchObject({
+      role: "toolResult",
+      details: { addedToolNames: ["Glob"] },
+    });
+  });
+
   it("skips a failed assistant row but still replays its tool pair", () => {
     const rows: UiMessage[] = [
       {

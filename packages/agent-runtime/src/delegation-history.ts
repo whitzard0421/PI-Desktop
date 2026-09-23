@@ -420,6 +420,17 @@ function truncateSeededMessages(
   return kept;
 }
 
+function firstToolNameList(...candidates: readonly unknown[]): string[] {
+  for (const candidate of candidates) {
+    if (!Array.isArray(candidate)) continue;
+    const names = [...new Set(candidate.filter(
+      (name: unknown): name is string => typeof name === "string" && name.length > 0,
+    ))];
+    if (names.length > 0) return names;
+  }
+  return [];
+}
+
 function toolResultFromUi(m: UiMessage, timestamp: number): ToolResultMessage {
   const raw = m.toolResult;
   const blocks: ToolResultMessage["content"] = [];
@@ -456,7 +467,22 @@ function toolResultFromUi(m: UiMessage, timestamp: number): ToolResultMessage {
           : MISSING_TOOL_RESULT_PLACEHOLDER,
     });
   }
-  const details = toJsonValue(isRecord(raw) ? raw.details : undefined);
+  const rawRecord = isRecord(raw) ? raw : undefined;
+  const rawDetails = toJsonValue(rawRecord?.details);
+  const detailsRecord = isRecord(rawDetails) ? rawDetails : undefined;
+  const addedToolNames =
+    m.toolName === "ToolSearch"
+      ? firstToolNameList(
+          detailsRecord?.addedToolNames,
+          detailsRecord?.activated,
+          rawRecord?.addedToolNames,
+          detailsRecord?.matches,
+        )
+      : [];
+  const details =
+    addedToolNames.length > 0
+      ? { ...(detailsRecord ?? {}), addedToolNames }
+      : rawDetails;
   return {
     role: "toolResult",
     toolCallId: m.toolCallId ?? "",
