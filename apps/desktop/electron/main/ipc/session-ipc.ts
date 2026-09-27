@@ -9,7 +9,6 @@ import {
   draftMatchesExisting,
   providerCreateInputFromDraft,
   isModelConfigImportSource,
-  type ActivationScope,
   type ModelConfigImportDraft,
   type Mode,
   type SessionThinkingLevel,
@@ -37,11 +36,6 @@ type RuntimeSession = {
   modelId?: string;
   thinkingLevel?: SessionThinkingLevel;
   [key: string]: unknown;
-};
-
-type ImportableModelConfig = ModelConfigImportDraft & {
-  id?: string;
-  secretValue?: string;
 };
 
 let scannedImportSessions = new Map<string, ExternalSessionSummary>();
@@ -210,7 +204,7 @@ export function registerSessionIpc({
           errorCode: ErrorCodes.INVALID_ARGUMENT,
         });
       }
-      if (activeTurns.has(sessionId)) {
+      if (activeTurns.has(sessionId) && !String(input.throughMessageId ?? "").trim()) {
         throw Object.assign(new Error("Cannot fork a running session"), {
           errorCode: ErrorCodes.AGENT_BUSY,
         });

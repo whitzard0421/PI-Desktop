@@ -166,6 +166,45 @@ test("tool-call disclosure headers span the conversation band", () => {
   assert.match(row, /min-width:\s*0;/);
 });
 
+test("delegation node copy wraps within the responsive card", () => {
+  const metrics = stylesSource.match(
+    /\.subagent-activity-metrics \{([^}]*)\}/,
+  )?.[1];
+  assert.ok(metrics);
+  assert.match(metrics, /overflow-wrap:\s*anywhere;/);
+  assert.match(metrics, /white-space:\s*normal;/);
+
+  const titleRow = stylesSource.match(
+    /\.subagent-topology-node-title-row \{([^}]*)\}/,
+  )?.[1];
+  assert.ok(titleRow);
+  assert.match(titleRow, /flex-wrap:\s*wrap;/);
+
+  const title = stylesSource.match(
+    /\.subagent-topology-node-title \{([^}]*)\}/,
+  )?.[1];
+  assert.ok(title);
+  assert.match(title, /-webkit-line-clamp:\s*2;/);
+  assert.match(title, /overflow-wrap:\s*anywhere;/);
+  assert.match(title, /white-space:\s*normal;/);
+  assert.doesNotMatch(title, /white-space:\s*nowrap;/);
+
+  const summary = stylesSource.match(
+    /\.subagent-topology-node-summary \{([^}]*)\}/,
+  )?.[1];
+  assert.ok(summary);
+  assert.match(summary, /-webkit-line-clamp:\s*2;/);
+  assert.match(summary, /overflow-wrap:\s*anywhere;/);
+  assert.match(summary, /white-space:\s*normal;/);
+
+  const steps = stylesSource.match(
+    /\.subagent-topology-node-steps \{([^}]*)\}/,
+  )?.[1];
+  assert.ok(steps);
+  assert.match(steps, /overflow-wrap:\s*anywhere;/);
+  assert.match(steps, /white-space:\s*normal;/);
+});
+
 test("assistant turns stay transparent full-width prose", () => {
   assert.match(
     stylesSource,
@@ -193,6 +232,31 @@ test("assistant turns stay transparent full-width prose", () => {
     stylesSource,
     /\.tool-activity-group\.has-subagents\s*\{[^}]*background:\s*var\(--ds-tile\)/,
   );
+});
+test("assistant error cards follow the responsive transcript column", () => {
+  const errorCard = stylesSource.match(/\n\.message-error \{([^}]*)\}/)?.[1];
+  assert.ok(errorCard);
+  assert.match(errorCard, /width:\s*100%;/);
+  assert.doesNotMatch(errorCard, /max-width\s*:/);
+  assert.match(
+    stylesSource,
+    /\.message-row\.assistant \.message-col,\s*\.message-row\.system \.message-col,\s*\.message-row\.tool \.message-col \{\s*width:\s*min\(100%,\s*var\(--chat-prose-max-width,\s*720px\)\);/,
+  );
+});
+
+test("decision and outcome cards follow the responsive transcript band", () => {
+  const cardRules = [
+    stylesSource.match(/\n\.permission-card \{([^}]*)\}/)?.[1],
+    stylesSource.match(/\n\.asktool-card \{([^}]*)\}/)?.[1],
+    stylesSource.match(/\n\.turn-outcome-card \{([^}]*)\}/)?.[1],
+  ];
+  for (const rule of cardRules) {
+    assert.ok(rule);
+    assert.match(
+      rule,
+      /width:\s*min\(100%,\s*var\(--chat-prose-max-width,\s*720px\)\);/,
+    );
+  }
 });
 
 test("transcript density and hover actions are quiet", () => {

@@ -310,6 +310,7 @@
 | D599 | 开发构建是一个独立安装 | **收窄 D236 / 修订 ADR 0094：开发构建（未打包，或 `PI_DESKTOP_DEV=1`）以 `PI-Desktop Dev` 作为 Electron `userData`（随之独立的单实例锁、渲染层 `localStorage`、插件面板 partition 与浏览器面板 Cookie），数据目录为 `~/.pi-desktop-dev`。显式 `--user-data-dir` 仍然优先，E2E 装置正是用它把构建指向临时 profile。正式安装仍保持 `PI-Desktop` 与 `~/.pi-desktop`，既有 profile 不会被搬迁。`PI_DESKTOP_DATA_DIR` 仍优先于两种 profile，并在作为子进程环境变量传给 host-core 之前被绝对化；Electron 主进程把解析结果回写到该变量，使插件运行时读到同一个根目录。不改 IPC、协议、schema 或正式安装路径。见 `03-runtime/07-process-model.md` 与 E2E-150。** | 已在运行的正式版持有锁，`pnpm dev` 一启动就退出；而抢到锁的开发 host 会把第二个 host-core 压到同一个单写者 `pi.sqlite`、outbox 与日志树上。 |
 | D602 | 崩溃转储留在数据目录 | **Electron 的 Crashpad 报告器在 `ready` 之前以本地模式启动（`uploadToServer: false`）。转储放在 `<data_dir>/crash-dumps`，而不是 Electron 默认的 `userData` crashDumps 路径，因此 `PI_DESKTOP_DATA_DIR` profile 不会与其它安装共用转储。下一次持有单实例锁的启动会为新于 `crash-dumps.json` 的转储写一条 `diagnostics` 记录，按 Crashpad `ptype` 分类：任一新转储属于 browser/main 进程则为 `error`，已恢复的 renderer/GPU/utility 崩溃为 `warn`。host-core 与 sidecar 崩溃仍走监督器路径。不上传，不改 IPC，不改 schema。** | 崩溃留下的 minidump 无人读取。Crashpad 也会记录已恢复的渲染进程崩溃，因此下次启动用 `error` 声称上次运行已死是错的；而数据目录之外的转储会逃出 `PI_DESKTOP_DATA_DIR` 隔离。 |
 | D619 | 复制公式得到的是它的 TeX 源码 | **仅渲染层：当选区覆盖到渲染出来的公式时，`text/plain` 从 MathML `annotation` 写出——行内 `$…$`，块级 `$$…$$` 独占行，也就是 `lib/latex-math.ts` 把 `\(…\)` 和 `\[…\]` 归一到的那组定界符，且每组定界符都像代码段的围栏那样加长到盖过公式内部出现的最长同字符串——而不是 KaTeX 画的那两棵树。落在公式内部的切口会扩展成整个公式。只有公式被改写：归约后的克隆经由 `Selection.toString()`——复制自己跑的那个序列化器——读回，因此同处一个选区的正文、列表、表格和代码块保留平台自己的读法，包括 `innerText` 会写出、而复制本就会略过的 `user-select: none` 界面零件。不含公式的选区，以及在选区所在位置之外触发的复制，整份交回平台。只写一种 flavour：`text/plain`。接管事件同时丢掉了平台的 `text/html`，且不再写回——归约后的克隆是应用自己的标记，写回去会带上文本读法已略过的 `user-select: none` 界面零件；而改为携带渲染结果则会把每个公式粘贴两遍，因为隐藏 MathML 树的只有 KaTeX 自己的样式表，样式表不会随剪贴板一起走。只有一个由外壳持有的文档级 `copy` 监听器，记录区的右键复制经由同一个模块读取同一个选区。** | 公式粘出来是它的字形，而且每棵渲染树各一份，无法带进 LaTeX 文档或别的 Markdown 编辑器（issue #414）。ADR 0268 当年移除「引用」的理由正是 OS 剪贴板可以替代，那剪贴板就得真的装着源码。 |
+| D620 | pi-ai 内置的 API-key 服务成为命名预设 | **向 `NAMED_ENDPOINT_PRESETS` 新增十五条命名预设——Ant Ling、Baseten、Cerebras、Hugging Face、Meta（`responses`）、MiniMax（国际）、Moonshot AI（国际）、NVIDIA、OpenCode Zen、Vercel AI Gateway、Qwen Token 套餐（`alibaba-token-plan`）、Qwen Token 套餐（中国）、小米 Token 套餐（中国/欧洲/新加坡）——各自使用官方主机名；models.dev 键与 pi-ai 提供方 id 不同的那几条，把 pi-ai id 保留为别名。八个内置提供方仍作例外并写明原因：Amazon Bedrock、Azure OpenAI、Cloudflare AI Gateway、Cloudflare Workers AI、Google Vertex AI（URL 里带账户或区域），GitHub Copilot 与 OpenAI Codex（以厂商账号行提供），以及 Radius（这里的 `pi_messages` 仅限账号）。pi-ai 升级后若某提供方既未被覆盖也不在例外中，`packages/agent-runtime/src/pi-ai-provider-sync.test.ts` 会失败。不改协议、存储或 IPC。** | pi-ai 其他能力本就可达，但服务目录的 API-key 一半靠手工维护，已经跟库自带的提供方列表脱节（ADR 0307）。 |
 
 ## M0. 模型目录决策
 
@@ -353,7 +354,8 @@
 | 身份证号 | 主题 | 决定 | 基本原理 |
 |---|---|---|---|
 | D118 | 平台应用程序菜单和窗口镶边 | **macOS 安装传统的系统应用程序菜单并保留隐藏式交通信号灯。 Windows/Linux 使用共享的 46px 无框架外壳以及本地化的 File/Edit/View/Window/Help 菜单和渲染器绘制的 minimize/maximize-or-restore/close 控件。两个菜单表面都通过固定的 `AppMenuCommand` 允许列表路由渲染器拥有的操作；渲染器菜单通过单独的固定允许列表路由本机 editing/window 操作。目标打包在 Electron 打包之前构建本地发布主机。这增加了平台就绪的 shell 行为，但不会逆转 D010：Windows/Linux 发布资格在 MVP 后仍然有效。** | 默认的 Electron 菜单会使 macOS shell 命令不完整，而无框 Windows/Linux 窗口会丢失应用程序菜单和窗口控件。共享允许列表可以保持行为一致，而不会暴露任意特权命令桥。 |
-| D120 | 应用程序更新交付 | *(amended by D364 / D603)* **Electron Main 独家拥有固定的 GitHub 发布源、更新轮询、类型化状态和安装生命周期。开发被禁用；打包的 macOS 和非 AppImage Linux 使用通知和链接传递，而 Windows NSIS 和 Linux AppImage 在应用程序内下载并在退出时安装。 Renderer IPC 无法提供 Feed URL。自动故障保持环境状态，显式检查表面状态，下载状态保持可操作。更新程序始终强制使用 `allowPrerelease = false`，因此预发布安装（例如 `0.2.0-rc.6`）会跟踪 GitHub 的最新稳定版本，而不是 electro-updater 的默认同通道引脚。 D126 随后发布由标签矩阵生成的每个平台提要，而 macOS 仍保持手动状态，直到签名通道合格为止。** | 将软件包安装保持在沙盒渲染器之外，匹配每种安装程序格式的交付，并在菜单、设置和更新横幅之间提供一种一致的状态 (ADR 0022)。如果没有稳定通道引脚，RC 不会构建更新的稳定通道，因为电子更新程序将 `rc` 视为自定义通道。 |
+| D120 | 应用程序更新交付 | *(amended by D364 / D603 / D628)* **Electron Main 独家拥有固定的 GitHub 发布源、更新轮询、类型化状态和安装生命周期。开发被禁用；打包的 macOS 和非 AppImage Linux 使用通知和链接传递，而 Windows NSIS 和 Linux AppImage 在应用程序内下载并在退出时安装。 Renderer IPC 无法提供 Feed URL。自动故障保持环境状态，显式检查表面状态，下载状态保持可操作。更新程序始终强制使用 `allowPrerelease = false`，因此预发布安装（例如 `0.2.0-rc.6`）会跟踪 GitHub 的最新稳定版本，而不是 electro-updater 的默认同通道引脚。 D126 随后发布由标签矩阵生成的每个平台提要，而 macOS 仍保持手动状态，直到签名通道合格为止。** | 将软件包安装保持在沙盒渲染器之外，匹配每种安装程序格式的交付，并在菜单、设置和更新横幅之间提供一种一致的状态 (ADR 0022)。如果没有稳定通道引脚，RC 不会构建更新的稳定通道，因为电子更新程序将 `rc` 视为自定义通道。 |
+| D628 | 用户可选择应用更新方式 | **修订 D120 / D603 / ADR 0022：`AppSettings.updatePreference` 按安装实例持久化 `automatic` 或 `manual`。自动模式保持现有的应用内下载与安装；仅支持自动安装的平台提供此选项。手动模式不自动下载或退出安装，继续定期检查稳定版，并对每个可用版本提醒一次。`lastNotifiedUpdateVersion` 保存在现有 Host 所有的应用设置中；这两个字段都不参与便携配置同步。Windows NSIS、已打包 macOS、Linux AppImage 默认自动；Windows ZIP/便携版和非 AppImage Linux 默认手动。Windows ZIP/便携版可以在看到 NSIS 可能替换解压副本的警告后明确选择自动。无需数据库 schema 或 Host 协议版本升级。** | 在为用户提供选择的同时，让免安装包默认保持安全并避免重复提醒。 |
 | D313 | 主进程拥有的 GitHub 问题反馈 | **GitHub issue 表单是唯一入口。Bug 表单必填描述、复现步骤、预期/实际行为、应用版本和操作系统；功能表单必填问题和期望改动。设置 → 信息提供一条「问题反馈」，走 `pi-desktop/app/openFeedback`。Electron Main 构造固定的 `bug_report.yml` URL，用主进程版本信息预填 `app-version` / `os` / `environment`，再以 `shell.openExternal` 打开。渲染器不能提供 URL。功能请求仍从 GitHub 模板选择器进入。不改 host 协议、存储或更新源（ADR 0157）。** | 缺少版本或复现步骤的报告无法排查；由渲染器选择目标会削弱 D120 同样的「GitHub URL 归主进程」规则。 |
 | D330 | 由主进程拥有的 openExternal 协议白名单 | **每次 `shell.openExternal` 先解析 URL。只有 `http:`、`https:`（含主机名和写出的 `//`）以及 `mailto:`（非空地址）会以规范化 href 到达操作系统。`file:`、`javascript:`、`data:` 和自定义方案被拒绝。见 ADR 0168。** | 任意协议的 openExternal 会把沙箱渲染器变成打开本地文件或执行脚本的入口。 |
 | D332 | 分类的插件文件预览与实时工作区事件 | **修订 ADR 0104 / 0105 / 0109 / 0111：在 `fs.read` 下增加 `fs.readPreview`（文本 / 图片 data URL / 二进制 / tooLarge，上限与宿主 Files 页相同）。工作区事件同时广播给停靠视图和独立面板。** | 插件需要与 Files 页同类的预览，以及工作区变更的实时信号。 |
@@ -367,6 +369,7 @@
 | D345 | 繁体中文外壳语言 | **修订 D314 / ADR 0160：以独立完整外壳目录发布 `zh-TW`，本地名称为繁體中文。`zh-TW`、`zh-Hant`、`zh-HK` 和 `zh-MO` 解析到繁体中文外壳；通用 `zh` 和简体中文区域继续解析到 `zh-CN`。持久化的 `AppSettings.language` 加入 `zh-TW`，Electron 打包 `zh-TW` 与 `zh_TW` 语言环境目录；应用内变更日志加入对应的 `zh-TW` 目录，使发行说明跟随当前繁体中文外壳。不改变宿主协议或存储架构版本。** | 繁体中文用户需要独立的外壳和发行说明语言；复用简体中文目录会使自动检测和可见术语不正确。 |
 | D346 | P0 国际外壳语言 | **修订 D314 / ADR 0160 / ADR 0182：发布完整的 `de`、`es` 和 `fr` 外壳目录，本地名称为 Deutsch、Español 和 Français。`de-*`、`es-*` 和 `fr-*` 解析到对应基础目录；持久化的 `AppSettings.language` 接受三个新 ID；匹配的变更日志目录让发行说明跟随当前语言。不改变宿主协议、存储架构或 IPC 版本。** | 西班牙语、法语和德语是缺失的最高价值 P0 国际化覆盖，而现有注册表和可搜索选择器已经可以扩展到更多语言。 |
 | D349 | 韩语应用程序壳 | **修订 D314 / ADR 0160 / ADR 0183：提供完整 `ko` 外壳目录，本地名한국어，英文名 Korean。`ko` 和 `ko-*` 解析到韩语目录；持久化 `AppSettings.language` 接受 `ko`；Electron 打包韩语 Chromium locale，并有匹配的韩语发版日志。不改主机协议或存储 schema。** | 韩语用户需要独立完整外壳和发版说明语言。 |
+| D605 | 巴西葡萄牙语应用程序壳 | **修订 D314 / ADR 0160 / ADR 0183 / ADR 0185：提供完整 `pt-BR` 外壳目录，本地名 Português (Brasil)，英文名 Portuguese (Brazil)。`pt-BR`、`pt_BR` 和 `pt-*` 解析到巴西葡萄牙语目录；持久化 `AppSettings.language` 接受 `pt-BR`；Electron 打包 `pt-BR` 与 `pt_BR` Chromium locale，并有匹配的巴西葡萄牙语发版日志。不改主机协议或存储 schema。见 ADR 0306。** | 巴西葡萄牙语用户需要独立完整外壳和发版说明语言。 |
 | D350 | 按焦点区分本机通知投递 | **修订 D117 / ADR 0107：渲染器在 `notification/showNative` 终端结果调用中标记 `kind: "task"`，在 asktool、工具权限和 Plan 审批调用中标记 `kind: "interactive"`。缺失或未知值默认为 `task`。任务本机投递仍然仅在未聚焦时进行，包括聚焦的背景会话；交互投递仅在确切的询问会话已在聚焦窗口中可见时抑制，因此聚焦其他会话时可以收到横幅。交互询问从不创建持久任务收件箱行，插件本机通知仍使用独立的权限门控 API。不改变主机协议或存储架构版本。** | PR #84 扩展共享 handler 的门控时，使聚焦的背景终端完成也显示了本机横幅，同时实现了聚焦背景交互询问通知的目标。显式 `kind` 在同一个 Electron 边界隔离这两种用户可见策略。 |
 | D358 | 在进行中重试行显示 provider 原因 | **修订 ADR 0175：`AgentActivity.retrying` 可携带有界、已脱敏的错误详情。紧凑重试行在静止时保持原样；悬停或键盘聚焦揭示本地化摘要、稳定码/状态和 provider 消息。中间重试不会变成转录错误行。见 ADR 0196 与 US-UI-60d。** | 用户需要当前重试原因，又不能复制最终助手错误。 |
 | D359 | 用宿主一次性补全总结首轮会话标题 | **首轮提示回退保持同步。`agent_end` 后渲染器调用白名单 `session/summarizeTitle`。Electron 解析会话模型并跑关闭思考的一次性补全；有效结果经 `session.rename` 持久化。自动替换拒绝已持久的 `manualTitle`。见 ADR 0186 与 E2E-021a。** | 截断的首轮提示当侧栏标签很差，但标题生成不能挡住回合或把凭据暴露给渲染器。 |
@@ -467,7 +470,7 @@
 |---|---|---|---|
 | D126 | 三平台发布交付（电梯D010） | *(amended by D364 / D603)* **标签构建将矩阵生成的每个工件发布到 GitHub 版本：macOS dmg/zip (arm64)、Windows NSIS x64、Linux AppImage + deb (x64)，每个都有块图和平台的 `latest*.yml` 电子更新器提要。发布提要会激活 D120 的 Windows NSIS 和 Linux AppImage 的应用内更新通道； macOS 保持通知和链接模式，直到签名通道合格为止。 NSIS 工件名称固定为无空格 (`PI-Desktop-Setup-${version}.${ext}`)，因为 GitHub 资产 URL 会损坏空格。根据基线凹凸规则（基线 `0.4.7`），D010 的仅限 macOS 范围被提升；发布管道本身在 v0.1.1-rc.1/v0.1.1 上通过了端到端合格。** | 无论如何，管道都会在每个标签上构建并验证所有三个平台；将安装程序保留为过期的 Actions 工件（保留 90 天）会阻止用户安装它们，而不会增加安全性。发布更新源是交付的重点：具有应用程序内通道的平台会静默更新，并且未来的平台回归会通过实际安装而不是未使用的工件来呈现。 |
 | D364 | Windows portable exe without installer | *(superseded by D603)* **Amend D120 / D126 / ADR 0022: tag builds publish a Windows x64 portable exe `PI-Desktop-Portable-${version}.exe` alongside the NSIS installer `PI-Desktop-Setup-${version}.exe`. The portable target does not write `latest.yml`. Packaged portable runs (`PORTABLE_EXECUTABLE_FILE`) use notify-and-link delivery. NSIS installs keep in-app download and quit-and-install. Data stays in the existing application data directory. Portable requests user execution level.** | Company environments that whitelist a single executable cannot run the NSIS installer. Applying the NSIS updater to a portable run would install the app, so portable stays manual (ADR 0197, E2E-211). |
-| D603 | Windows portable delivery uses a normal ZIP | **Amend D364 / ADR 0022 / ADR 0197: tag builds publish a Windows x64 portable ZIP `PI-Desktop-Portable-${version}.zip` alongside the NSIS installer `PI-Desktop-Setup-${version}.exe`. The Windows release helper builds NSIS and ZIP separately, stamps ZIP app metadata with `piDistribution = "zip"`, and keeps the ZIP target out of `latest.yml`. Extracted ZIP runs use notify-and-link delivery; the updater still recognizes `PORTABLE_EXECUTABLE_FILE` for older portable executables. Data stays in the existing application data directory.** | The self-extracting portable wrapper could trigger administrator prompts and did not provide a reliable normal executable identity for the taskbar. A user-extracted ZIP launches `PI-Desktop.exe` directly and preserves the manual-update boundary. |
+| D603 | Windows portable delivery uses a normal ZIP | *(amended by D628)* **Amend D364 / ADR 0022 / ADR 0197: tag builds publish a Windows x64 portable ZIP `PI-Desktop-Portable-${version}.zip` alongside the NSIS installer `PI-Desktop-Setup-${version}.exe`. The Windows release helper builds NSIS and ZIP separately, stamps ZIP app metadata with `piDistribution = "zip"`, and keeps the ZIP target out of `latest.yml`. Extracted ZIP runs use notify-and-link delivery; the updater still recognizes `PORTABLE_EXECUTABLE_FILE` for older portable executables. Data stays in the existing application data directory.** | The self-extracting portable wrapper could trigger administrator prompts and did not provide a reliable normal executable identity for the taskbar. A user-extracted ZIP launches `PI-Desktop.exe` directly and preserves the manual-update boundary. |
 | D260 | 发布文档是一个版本载体 | **稳定版本号提升必须在打标签之前更新每一处带版本号的载体：双语言的应用内变更日志及其测试清单、每个工作区的 `package.json`（包括之前被第三个工作区根 `scripts/release.mjs` 跳过的 `docs/package.json`）、Cargo 工作区版本与 `host-core` 的锁文件条目、`APP_VERSION`，以及 `README.md` 和 `README.zh-CN.md` 中声明的 `<major>.<minor>.x` 发布线。`scripts/check-release-docs.mjs` 校验全部这些；`scripts/release.mjs` 在提升版本号之后运行它，只要任一载体不一致就拒绝提交或打标签，`--skip-docs-check` 仅保留给刻意的非发布性版本提升。扩展 D164。** | 仅有应用内变更日志这道闸门，导致已发布的文档落后：版本已到 `0.10.8`，两个 README 仍在宣传 `0.5.x` 线，而 `docs/package.json` 停在 `0.5.8`。标签是不可逆的，所以这项检查在标签存在之前运行，而不是作为评审礼节。 |
 | D371 | 显式的未签名 macOS 首次启动助手 | *（由 D406 和 D443 修订）* **每个 macOS 分发都附带可执行的 `PI-Desktop-macOS-open.command`，放在 DMG 上拖入 Applications 手势下方的可见首启行。它只查找 `/Applications/PI-Desktop.app` 与 `~/Applications/PI-Desktop.app`，校验 `CFBundleIdentifier` 为 `net.aiuo.pi-desktop`，仅在存在时移除 `com.apple.quarantine`，然后打开应用。永不使用 `sudo`，不接受任意路径，也不替代 Developer ID 签名或公证。** | 未签名的 macOS 通道可能被 quarantine 拦截并显示误导性的\"已损坏\"提示，而仅限终端的 `xattr -cr` 说明比启动失败所需的范围更宽（ADR 0204，E2E-196b） |
 | D443 | 规范应用 ID 与 macOS 代码签名标识 | **修订 D141 / D371 / ADR 0204：应用 ID 为 `net.aiuo.pi-desktop`（`APP_ID`、electron-builder `appId`、macOS `CFBundleIdentifier`、Windows AppUserModelID）。开发用 macOS 宿主为 `net.aiuo.pi-desktop.dev`。不要在 `afterPack`/`afterSign` 对未签名包做 adhoc 签名：嵌套 Electron helper 此时尚未签名，`codesign` 会报 `code object is not signed at all`。见 ADR 0278、issue #524。** | 所有者域名为 `net.aiuo.pi-desktop`。未签名包的 Identifier 绑定推迟到有安全的 helper 签名路径之后。 |
@@ -976,9 +979,10 @@ project/group 层，而主要操作和页脚标识仍保留在
   不值得信赖。
 - `env` 和 `headers` 仅通过插件自己的设置进行解析
   `{ "setting": "<key>" }`；主机环境永远不会被传递（D018）。
-  stdio 子进程获取 `PATH`、temp/locale 变量和声明的值 — 无
-  否则。 `command` 必须是裸路径名称或与插件相关的名称； `url` 必须是
-  `https` 除非主机环回。
+  stdio 子进程获取 `PATH`、temp/locale、工具链键（`HOME`、`USERPROFILE`、
+  `PATHEXT`、`ComSpec`、`FNM_DIR` 等）以及声明的值——不含 provider 密钥。
+  裸 `npx`/`uvx` 会解析到真实二进制（官方 Node、fnm、nvm、Volta）。
+  `command` 必须是裸 PATH 名称或插件相对路径；`url` 必须是 `https`，除非主机环回。
 - 两种传输方式而不是单独的 stdio：托管 MCP 端点很常见
   足以让 stdio-only 推送插件将其包装在本地垫片中，
   这更糟糕——一个额外的过程和一个无法审查的代理。
@@ -4970,3 +4974,135 @@ Markdown 源码，不是 `text/html` 负载；对禁用行内 HTML 的外部编�
   只查自身目录。后缀本身不赋予推理能力：未命中的自由格式 ID 仍是未知通用
   模型，已发布能力和显式绑定覆盖沿用既有优先级。见
   `03-runtime/13-model-catalog-and-selection.md` §11.2。
+
+## 2026-09-24 —— Windows stdio MCP 解析官方 Node 与 fnm 的 npx（D624，issue #789）
+
+- 修订 D176 / D600 / ADR 0038。D600 在 Unix 探测 login-shell PATH，Windows 仍用
+  进程继承的 PATH。这启动不了 `npx.cmd`：`spawn({ shell: false })` 对 `npx`
+  返回 ENOENT，对 `.cmd` 返回 EINVAL，即使官方 Node 已在 PATH 里（issue #789）。
+- Electron main 在 spawn 前解析裸 `npx`/`npm`/`node`/`uvx`：PATH 上的官方
+  `node.exe` 优先，然后是 fnm / nvm-windows / Volta。若 `npx-cli.js` 与
+  `node.exe` 同目录，子进程直接跑 `node` 加该脚本，不经过 cmd.exe。其余
+  `.cmd` 走 `cmd.exe /d /s /c`，参数加引号保持字面量。PATHEXT 优先于无扩展名
+  的 Git-Bash `npx` 脚本。
+- 密钥仍不穿越（D018）。命令名保持裸名。见 ADR 0038 与
+  `07-plugins/04-plugin-security.md`。
+
+## 2026-09-24 — 由正文自己遮挡，而不是停靠区画一条色带（D624，issue #728）
+
+- 为 issue #728 加在 `.composer-dock-docked` 上的不透明 `--ds-bg-primary`
+  色带确实挡住了正文漏到 Composer 下方，但它同时盖住了主题画在会话面板上的
+  东西：主题填充 `.main-pane` 或 `.thread-scroll`（主题工坊的 `main` /
+  `thread` 区域）时，聊天底部会出现一块内置工作区色的硬边矩形。这条色带不
+  属于任何主题区域，唯一可用的杠杆是 `--ds-bg-primary` 本身，而所有其它主
+  表面都跟着它走。
+- `.composer-dock-docked` 现在不绘制任何底衬，改由 `.thread-scroll` 用
+  `linear-gradient(to bottom, #000 calc(100% - var(--composer-dock-height)
+  - 16px), transparent calc(100% - var(--composer-dock-height) + 2px))`
+  遮掉自身内容。渐变按滚动容器自己的盒子解析，因此正文移动时它仍锚在面板
+  上；`- 16px` 正好是 `.thread-content` 在 Composer 实测高度之下留出的尾部
+  预留，所以滚到底时最后一行保持完全不透明，只有越过边界的行会淡出。
+- 遮罩挂在滚动容器而不是 `.thread-wrap`：缩略导航轨道、跳到最新按钮、骨架
+  遮罩和导航状态都是 `.thread-wrap` 的子节点，必须保持完全绘制。停靠区自己
+  堆叠的面板（`.asktool-card`、`.plan-approval-bar`、排队提示、输入胶囊）
+  本来就是不透明的，且是 `.thread-wrap` 的兄弟节点，因此不受影响。滚动条
+  最后 18px 由「被色带盖住」改为「淡出」。
+- 仅改渲染器 CSS 与主题表面回归用例。主题表面探针把停靠区固定为全透明，并
+  断言遮罩跟随 `--composer-dock-height`。滚动状态、协议、持久化、主题
+  schema、权限都没有变化。见 `04-ux/08-component-spec.md` 与
+  E2E-CHAT-opaque-floating-decision-and-retry-surfaces。
+
+## 2026-09-25 —— 模型设置统一为一份 AI 服务列表加一份已选模型摘要（D625）
+
+- 模型设置页在用户连接任何服务前要求太多。API-key 服务打开时是一个收起的
+  服务菜单，订阅式厂商在页面靠下有自己的按钮和对话框，插件声明的服务又在
+  另一处，于是第一步的决定是"去哪看"而不是"连什么"。用户反馈流程过于繁重。
+  本次重设计保留沉浸式、无边框的 D297 基调（in-flow 面用
+  `--ds-tile`/`--ds-raised` 与间距、不描边；只有浮层菜单和对话框保留 0.5px
+  描边和阴影），把这些选择收拢为一份列表和一条新增流程。
+- API 服务、插件声明的服务和厂商订阅账号现在共享同一份 AI 服务列表
+  （`ServiceList`、`ServiceRow`）。行本身就是入口——点击或回车打开它的编辑器
+  ——因此行上只保留启用开关和一个溢出菜单；点击挂在行元素而非按钮上，这样卡片
+  拖拽仍可从卡片任意处开始。账号行仍通过厂商账号编辑器与 `deleteOauthAccount`
+  存续，绝不走 provider CRUD，所以即便两类在同一列表渲染，所有权边界不变。
+- 新增服务从一个可搜索的选择器（`ServiceChooser`）开始，而非收起的菜单：订阅
+  与 API-key 服务并列成磁贴，自定义端点排最后，因为它是唯一需要不止一个密钥的
+  选择。过滤从不与 host 通信。选中磁贴后进入服务表单（`ProviderSetupDialog`，
+  两个视图），凭据行独立成组件（`ProviderConnectionFields`，D310 + D625）。
+- 服务对话框与厂商账号对话框都打开在已选模型摘要（`ChosenModelsSummary`）上，
+  完整的双栏选择器（`ModelSelectionPanes`）只需一次点击，因为多数人会保留服务
+  自带的模型。新的 API 服务会预选推荐模型（`recommended-models.ts`、
+  `useRecommendedModelSelection`）：只有可调用工具的对话模型才是候选，存在
+  models.dev 元数据时每个家族取最新稳定型（至多 `RECOMMENDED_MODEL_LIMIT` 个），
+  首个入选成为服务默认——因此保存一个密钥就足以开始对话。缺乏可信发现结果时
+  （密钥被拒、超时或网络失败）不预选；仅是没有 `/models` 路由的已知厂商仍算作
+  接受了密钥。
+- 覆盖测试：`apps/desktop/test/service-chooser.test.mjs`、
+  `service-catalog.test.mjs`、`service-row-status.test.mjs`、
+  `recommended-models.test.mjs`、`provider-form-layout.test.mjs`、
+  `default-model-display.test.mjs` 及更新后的 `settings-general.test.mjs`，
+  另加 `scripts/e2e/provider-api-style.tsx` 探针（选择器磁贴以 `data-service-id`
+  标记、自定义端点排最后、账号对话框打开在 `provider-models-summary` 上、每模型
+  控件位于"管理模型"和折叠的"高级"展开项之后）。厂商 OAuth 账号仍由 ADR 0098
+  管辖。
+
+## 2026-09-25 —— 自定义端点排在 API-key 组首位（D626）
+
+- 服务选择器按共享预设顺序列出 API-key 磁贴，把自定义端点放在它们之后，于是要
+  连上自己的地址就得先滚过所有具名厂商。自定义端点现在排在所在组首位：它是唯一
+  不需要先找到什么的选择，而该组仍然是"用 API key 连接"。分组顺序不变（订阅
+  仍在 API-key 服务之上），键盘遍历也仍从网格第一个磁贴进入。
+- 覆盖：更新后的 `apps/desktop/test/service-chooser.test.mjs`，以及
+  `scripts/e2e/provider-api-style.tsx` 探针——它现在断言第一个
+  `[data-service-id]` 磁贴是 `custom`，而不是最后一个。
+
+## 2026-09-25 —— 模型设置直接打开双栏，兜底列表给出全部模型（D627）
+
+- 编辑一个服务或厂商账号时，之前先落在「已选模型摘要」（`ChosenModelsSummary`）上，
+  真正的选择器还要再点一次才出现，于是要动一个逐模型控件得先做两次决策。现在两个
+  对话框都直接渲染双栏（`ModelSelectionPanes`）——左边是该服务自己的列表，右边是
+  该凭据会运行的模型——摘要与「管理模型 / 收起」这对控件删除，只有摘要能显示的
+  `autoPicked` 提示也随之取消。自动预选逻辑不变（`recommended-models.ts`、
+  `useRecommendedModelSelection`），只是把这句话放在选中的模型旁边：推荐模型是
+  起点，而不是屏幕上唯一的东西。
+- 服务自己没有模型列表时，目录兜底现在给出该厂商发布的整套模型
+  （设置处理器以 `modelsForProvider({ includeNonChat: true })` 调用），因此这个 key
+  能调用的 embedding、语音、图像、重排端点会和聊天模型一起出现，而不是悄悄缺
+  席。默认行为仍是只要文本模型，因为会话与 agent 路径要的是它们真正能跑的模型；
+  自动预选也仍然只挑可调工具的聊天模型。
+- 覆盖：更新后的 `apps/desktop/test/provider-form-layout.test.mjs`（两个对话框都直接
+  渲染双栏、没有可折叠的摘要）、`apps/desktop/test/settings-general.test.mjs`、
+  `apps/desktop/test/service-chooser.test.mjs`，以及新增的
+  `apps/desktop/test/provider-model-list-scope.test.mjs`（默认列表只有文本模型，
+  `includeNonChat` 补上被隐藏的端点且不丢 id、不重复），另有
+  `scripts/e2e/provider-api-style.tsx` 与 `scripts/e2e/image-generation-ui.tsx`
+  探针——它们不再点击「管理模型」。
+
+## 2026-09-26 —— 用户可选择应用更新方式（D628）
+
+- 设置 → 关于新增按安装实例保存的「自动 / 手动」更新方式。支持自动安装的
+  Windows NSIS、已打包 macOS 与 Linux AppImage 默认自动；Windows ZIP/便携版和
+  不支持自动安装的包默认手动。手动模式仍定期检查，但不自动下载或退出安装。
+- 手动模式对每个新版本只提醒一次。Host 设置会跨重启记录最近提醒版本；Renderer
+  也会阻止路由重新挂载后重复显示。设置 → 关于仍保留版本状态和发布页入口。
+- Windows ZIP/便携版可明确选择自动，但会先提示 NSIS 可能替换解压目录中的副本。
+  无需数据库迁移或 Host 协议版本变更。
+- 覆盖：`apps/desktop/test/update-preference.test.mjs`、更新后的
+  `apps/desktop/test/auto-update.test.mjs` 与 E2E-UPDATE-preference-and-once-only-reminder。
+
+## 2026-09-27 —— 路由模型元数据采用保守的末段匹配（D630，PR #1047）
+
+- 取代 D622 中用于运行期补全的宽泛目录别名。只比较大小写不敏感的最后一个 `/` 段，
+  让路由或网关 wire ID 可以命中目录记录，同时不再把任意 thinking、发布日期、部署标记
+  或厂商短横线后缀当作模型身份。
+- 一个叶子对应多个目录候选时，只有官方/来源提供商的提供商族与显式模型来源一致才优先
+  采用唯一官方命中；否则只有所有候选的能力和思考元数据完全一致时才借用。两条规则都
+  无法证明身份时保持未匹配。已知提供商仍可从其他发布方借用完全相同的 ID；未知提供商
+  不使用无锚点共识或部署标记兜底。
+- Composer 模型行保留完整的配置 wire ID。未匹配模型提供规范思考阶梯供手动启用，但
+  新草稿/会话在没有显式绑定默认值时从 `off` 开始。空的绑定等级数组是未知模型的通用
+  种子而不是显式禁用；非空 binding 覆盖仍然有效。目录命中的模型保留 D303 的绑定默认值
+  与最高已启用档回退行为。
+- 该变化只影响元数据和 UI 投影，不改写持久化 wire ID、提供商身份或 host 能力归属。参见
+  `03-runtime/13-model-catalog-and-selection.md` §11.3 与
+  `04-ux/08-component-spec.md` §11。

@@ -7,6 +7,7 @@ import { catalogs, flattenCatalog } from "@pi-desktop/i18n";
 import { IPC } from "@pi-desktop/shared";
 import { SettingsPage } from "../../apps/desktop/src/features/settings/SettingsPage";
 import { useAppStore } from "../../apps/desktop/src/stores/app-store";
+import { initLanguageSync } from "../../apps/desktop/src/lib/app-language";
 
 const destinations = ["A", "B"].map((id) => ({
   ref: `fixture:${id}`, pluginId: "fixture", label: `Themes ${id}`, keywords: [],
@@ -22,14 +23,45 @@ let settings = {
   enterToSend: true,
   developerMode: false,
 };
+let updateState = {
+  mode: "in-app",
+  preference: "automatic",
+  defaultPreference: "automatic",
+  automaticSupported: true,
+  manualReminder: false,
+  status: "available",
+  currentVersion: "0.15.8",
+  availableVersion: "0.15.9",
+  releasesUrl: "https://github.com/vastsa/PI-Desktop/releases/latest",
+};
+const updateStateListeners = new Set();
 window.piDesktop = {
-  platform: "darwin", on: () => () => {},
+  platform: "darwin",
+  on(channel, listener) {
+    if (channel === IPC.event.updatesState) updateStateListeners.add(listener);
+    return () => updateStateListeners.delete(listener);
+  },
   async invoke(channel, input) {
     let data;
     switch (channel) {
       case IPC.invoke.pluginScenicThemesDestinations: data = destinations; break;
       case IPC.invoke.settingsGet: data = settings; break;
-      case IPC.invoke.settingsSet: settings = input; data = settings; break;
+      case IPC.invoke.settingsSet:
+        settings = input;
+        data = settings;
+        if (settings.updatePreference === "automatic" || settings.updatePreference === "manual") {
+          updateState = {
+            ...updateState,
+            preference: settings.updatePreference,
+            mode: settings.updatePreference === "automatic" ? "in-app" : "manual",
+          };
+          for (const listener of updateStateListeners) listener(updateState);
+        }
+        break;
+      case IPC.invoke.providersList: data = { providers: [] }; break;
+      case IPC.invoke.sessionList: data = { sessions: [] }; break;
+      case IPC.invoke.appGetOnboarding: data = {}; break;
+      case IPC.invoke.updatesGetState: data = updateState; break;
       case IPC.invoke.configSyncGetState:
         data = {
           configured: false,
@@ -52,9 +84,18 @@ window.piDesktop = {
     return { ok: true, data };
   },
 };
-await i18n.use(initReactI18next).init({ lng: "en", fallbackLng: "en", keySeparator: false,
-  resources: { en: { translation: flattenCatalog(catalogs.en) } }, interpolation: { escapeValue: false } });
+await i18n.use(initReactI18next).init({
+  lng: "en",
+  fallbackLng: "en",
+  keySeparator: false,
+  resources: {
+    en: { translation: flattenCatalog(catalogs.en) },
+    "pt-BR": { translation: flattenCatalog(catalogs["pt-BR"]) },
+  },
+  interpolation: { escapeValue: false },
+});
 useAppStore.setState({ settings, settingsTab: "ai", page: "settings" });
+initLanguageSync();
 const root = createRoot(document.getElementById("root"));
 flushSync(() => root.render(<SettingsPage />));
 const frame = () => new Promise(requestAnimationFrame);
@@ -117,8 +158,91 @@ async function scroll() {
   assert(pane().scrollTop > 0, "Destination must be scrollable for this check");
   return pane().scrollTop;
 }
+async function exerciseUpdatePreference() {
+  await select("Info");
+  await settle();
+  const trigger = () => document.querySelector('button[aria-label="Update behavior"]');
+  assert(trigger() instanceof HTMLButtonElement, "Update behavior selector must render");
+  assert(trigger().textContent?.includes("Automatic"), "Installed package defaults to Automatic");
+  assert(
+    [...document.querySelectorAll(".update-settings-actions button")]
+      .some((button) => button.textContent?.includes("Check for updates")),
+    "Automatic mode keeps the existing update check action",
+  );
+
+  async function choosePreference(label, value) {
+    const selectTrigger = trigger();
+    assert(selectTrigger instanceof HTMLButtonElement, "Update selector trigger must remain mounted");
+    flushSync(() => selectTrigger.click());
+    await settle();
+    const option = [...document.querySelectorAll('[role="option"]')]
+      .find((candidate) => candidate.textContent?.trim() === label);
+    assert(option instanceof HTMLButtonElement, `Missing update preference option: ${label}`);
+    flushSync(() => option.click());
+    await settle();
+    assert(settings.updatePreference === value, `${label} preference must persist through settings IPC`);
+    assert(useAppStore.getState().settings?.updatePreference === value, `${label} preference must update the renderer store`);
+    assert(updateState.preference === value, `${label} preference must update the shared update state`);
+  }
+
+  await choosePreference("Manual", "manual");
+  assert(trigger().textContent?.includes("Manual"), "Manual must become the selected value");
+  assert(
+    [...document.querySelectorAll(".update-settings-actions button")]
+      .some((button) => button.textContent?.includes("View release")),
+    "Manual mode must offer the release page for an available version",
+  );
+
+  await select("AI");
+  await select("Info");
+  await settle();
+  assert(trigger().textContent?.includes("Manual"), "Manual preference must survive leaving and reopening Info");
+  await choosePreference("Automatic", "automatic");
+  assert(trigger().textContent?.includes("Automatic"), "Automatic must be selectable again");
+  return { updatePreference: settings.updatePreference, updateMode: updateState.mode };
+}
+
+async function exerciseBrazilianPortuguese() {
+  await select("General");
+  const trigger = document.querySelector(".settings-language-trigger");
+  assert(trigger instanceof HTMLButtonElement, "Language picker trigger must render");
+  flushSync(() => trigger.click());
+  await settle();
+
+  const search = document.querySelector(".settings-language-search input");
+  assert(search instanceof HTMLInputElement, "Language picker search must render");
+  const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
+  assert(setter, "Language search input must expose its value setter");
+  setter.call(search, "Português (Brasil)");
+  search.dispatchEvent(new Event("input", { bubbles: true }));
+  await settle();
+
+  const option = [...document.querySelectorAll(".settings-language-option")]
+    .find((candidate) => candidate.textContent?.includes("Português (Brasil)"));
+  assert(option instanceof HTMLButtonElement, "Brazilian Portuguese must be searchable");
+  const languageChanged = new Promise((resolve) => i18n.once("languageChanged", resolve));
+  flushSync(() => option.click());
+  await languageChanged;
+  await settle();
+
+  assert(settings.language === "pt-BR", "Choosing Portuguese must persist pt-BR");
+  assert(useAppStore.getState().settings?.language === "pt-BR", "App settings must retain pt-BR");
+  assert(document.documentElement.lang === "pt-BR", "Document language must update to pt-BR");
+  assert(navButton("Geral"), "Settings navigation must switch to Brazilian Portuguese");
+  assert(!navButton("General"), "English navigation must be replaced after switching locales");
+  const languageTitle = [...document.querySelectorAll(".settings-row-title")]
+    .find((node) => node.textContent?.trim() === "Idioma");
+  assert(languageTitle, "The language setting label must be translated");
+  const selectedLabel = document.querySelector(".settings-language-trigger-label");
+  assert(selectedLabel?.textContent?.trim() === "Português (Brasil)", "Picker must show the selected native name");
+  return { locale: i18n.language, language: settings.language, label: selectedLabel.textContent.trim() };
+}
 window.settingsScrollProbe = async () => {
   await settle();
+  assert(
+    document.activeElement === document.querySelector(".settings-search"),
+    "Mounting Settings must move focus to its search control",
+  );
   const checks = [];
   await checkCloudSyncVisibility();
   for (const theme of ["light", "dark"]) {
@@ -190,5 +314,7 @@ window.settingsScrollProbe = async () => {
     assert(pane().scrollTop > 0, "Search within the active tab must still locate its row");
     checks.push({ theme, ok: true });
   }
+  checks.push(await exerciseUpdatePreference());
+  checks.push(await exerciseBrazilianPortuguese());
   return { ok: true, checks };
 };

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile } from "node:fs/promises";
+import { mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -103,6 +103,38 @@ test("duplicate message id does not stall later outbox entries (D444)", async ()
   );
 });
 
+test("a full outbox rejects an entry instead of reporting it enqueued", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "pi-outbox-full-"));
+  const path = join(dir, "session-message-outbox.json");
+  const entries = Array.from({ length: 1024 }, (_, index) => ({
+    key: `message:s${index}:m${index}`,
+    sessionId: `s${index}`,
+    message: { id: `m${index}` },
+  }));
+  await writeFile(path, JSON.stringify(entries), "utf8");
+  const logs = [];
+  const outbox = new PersistenceOutbox(dir, (level, message, data) => {
+    logs.push({ level, message, data });
+  });
+
+  await assert.rejects(
+    outbox.enqueue(
+      { key: "message:last:missing", sessionId: "last", message: { id: "missing" } },
+      () => null,
+    ),
+    /outbox is full/i,
+  );
+  assert.equal(outbox.size(), 1024);
+  assert.equal(JSON.parse(await readFile(path, "utf8")).length, 1024);
+  assert.ok(
+    logs.some(
+      (entry) =>
+        entry.message === "session persistence outbox is full" &&
+        entry.data?.key === "message:last:missing",
+    ),
+  );
+});
+
 test("non-unique flush errors still pause the outbox", async () => {
   const dir = await mkdtemp(join(tmpdir(), "pi-outbox-"));
   const outbox = new PersistenceOutbox(dir, silent);
@@ -181,3 +213,42 @@ test("PLUGIN_PERMISSION_DENIED is not poison and still pauses the outbox (D597)"
   assert.equal(outbox.size(), 2);
 });
 
+
+test("FOREIGN KEY constraint failed drops the orphaned entry and keeps draining (#996)", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "pi-outbox-"));
+  const logs = [];
+  const outbox = new PersistenceOutbox(dir, (level, message, data) => {
+    logs.push({ level, message, data });
+  });
+  const calls = [];
+  const host = mockHost(async (_method, params) => {
+    calls.push(params);
+    if (params.message.id === "orphaned-child") {
+      throw new Error("Error: FOREIGN KEY constraint failed");
+    }
+  });
+  const getHost = () => host;
+  await outbox.enqueue(
+    {
+      key: "message:s1:orphaned-child",
+      sessionId: "s1",
+      message: { id: "orphaned-child" },
+    },
+    getHost,
+  );
+  await outbox.enqueue(
+    {
+      key: "message:s2:healthy",
+      sessionId: "s2",
+      message: { id: "healthy" },
+    },
+    getHost,
+  );
+  await outbox.flush(getHost);
+  assert.equal(outbox.size(), 0, "both entries should be drained");
+  assert.equal(calls.length, 2);
+  assert.equal(calls[1].message.id, "healthy");
+  assert.ok(
+    logs.some((row) => row.message === "session persistence flush dropped orphaned message"),
+  );
+});

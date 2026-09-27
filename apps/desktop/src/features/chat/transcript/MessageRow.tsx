@@ -1,8 +1,11 @@
 import {
   memo,
   useMemo,
+  useEffect,
+  useRef,
   useState,
   type MouseEvent as ReactMouseEvent,
+  type ReactNode,
 } from "react";
 import { useTranslation } from "react-i18next";
 import type { UiMessage } from "@pi-desktop/shared";
@@ -24,11 +27,43 @@ import {
   FileRefChip,
   LinkifiedText,
   MessageAttachmentImage,
+  MessageTimestamp,
 } from "./shared";
 import {
   useChatTextActions,
   useTranscriptMenu,
 } from "./TranscriptMenu";
+
+function SkillInvocationText({ message }: { message: UiMessage }) {
+  const command = message.command ?? "";
+  const mentions = message.skillMentions ?? [];
+  const parts: ReactNode[] = [];
+  let cursor = 0;
+  for (const mention of mentions) {
+    if (
+      !Number.isInteger(mention.start) ||
+      !Number.isInteger(mention.end) ||
+      mention.start < cursor ||
+      mention.end > command.length ||
+      !command.slice(mention.start, mention.end).startsWith("/")
+    ) {
+      return <LinkifiedText text={command} attachments={message.attachments} />;
+    }
+    if (mention.start > cursor) {
+      parts.push(<LinkifiedText key={`text-${cursor}`} text={command.slice(cursor, mention.start)} attachments={message.attachments} />);
+    }
+    parts.push(
+      <code key={`skill-${mention.start}`} className="chat-command-chip" title={mention.id}>
+        {command.slice(mention.start, mention.end)}
+      </code>,
+    );
+    cursor = mention.end;
+  }
+  if (cursor < command.length) {
+    parts.push(<LinkifiedText key={`text-${cursor}`} text={command.slice(cursor)} attachments={message.attachments} />);
+  }
+  return <>{parts}</>;
+}
 
 export const MessageRow = memo(function MessageRow({
   message,
@@ -40,6 +75,7 @@ export const MessageRow = memo(function MessageRow({
   const { t } = useTranslation();
   const openTranscriptMenu = useTranscriptMenu();
   const { copyText, selectText } = useChatTextActions();
+  const prepareUserMessageEdit = useAppStore((s) => s.prepareUserMessageEdit);
   const editUserMessage = useAppStore((s) => s.editUserMessage);
   const activateMessageRevision = useAppStore((s) => s.activateMessageRevision);
   const deleteMessage = useAppStore((s) => s.deleteMessage);
@@ -53,6 +89,9 @@ export const MessageRow = memo(function MessageRow({
   const editSeed =
     (editableUserMessage && message.command) || (message.content || "");
   const [editing, setEditing] = useState(false);
+  const [loadingEdit, setLoadingEdit] = useState(false);
+  const editRequest = useRef<AbortController | null>(null);
+  useEffect(() => () => editRequest.current?.abort(), []);
   const [editValue, setEditValue] = useState(editSeed);
   const [retryingEdit, setRetryingEdit] = useState(false);
   const copyLabel = t("chat.copy");
@@ -75,6 +114,34 @@ export const MessageRow = memo(function MessageRow({
     );
     return attachments.filter((attachment) => !inline.has(attachment.ref));
   }, [message.attachments, message.content, workspaceRoot]);
+  const beginEdit = async () => {
+    if (!editableUserMessage || isRunning || loadingEdit) return;
+    const request = new AbortController();
+    editRequest.current?.abort();
+    editRequest.current = request;
+    setLoadingEdit(true);
+    // Subscribe synchronously: React can batch A→B→A into a single render.
+    const unsubscribe = useAppStore.subscribe((state, previous) => {
+      if (state.activeSessionId !== previous.activeSessionId ||
+        state.selectingSessionId !== previous.selectingSessionId) request.abort();
+    });
+    request.signal.addEventListener("abort", () => {
+      unsubscribe();
+      if (editRequest.current === request) setLoadingEdit(false);
+    }, { once: true });
+    try {
+      const full = await prepareUserMessageEdit(message.id, request.signal);
+      if (!full || request.signal.aborted || editRequest.current !== request) return;
+      setEditValue(full.command || full.content || "");
+      setEditing(true);
+    } finally {
+      unsubscribe();
+      if (editRequest.current === request) {
+        editRequest.current = null;
+        setLoadingEdit(false);
+      }
+    }
+  };
   const cancelEdit = () => {
     setEditValue(editSeed);
     setEditing(false);
@@ -103,16 +170,13 @@ export const MessageRow = memo(function MessageRow({
         selectTarget: event.currentTarget.querySelector<HTMLElement>(
           editing ? ".message-edit-input" : ".message-bubble",
         ),
-        editable: editableUserMessage && !editing,
+        editable: editableUserMessage && !editing && !loadingEdit,
         running: isRunning,
         revision: !editing && showRevisionPager
           ? { count: revisionCount, active: activeRevision }
           : null,
         actions: { copyText, selectText },
-        onEdit: () => {
-          setEditValue(editSeed);
-          setEditing(true);
-        },
+        onEdit: () => void beginEdit(),
         onDelete: () => void deleteMessage(message.id),
         onActivateRevision: (index) =>
           void activateMessageRevision(message.id, index),
@@ -215,17 +279,19 @@ export const MessageRow = memo(function MessageRow({
                 {message.content ? (
                   <div className="message-user-text selectable">
                     {editableUserMessage && message.command ? (
-                      // Slash invocations show the typed form as a chip; the
-                      // expanded template body lives in `content` (hover reveals
-                      // it) and is what regenerate/reseed replay (D123).
-                      <code
-                        className="chat-command-chip"
-                        data-source-start={0}
-                        data-source-end={message.content.length}
-                        title={String(message.content || "")}
-                      >
-                        {message.command}
-                      </code>
+                      message.skillMentions?.length ? (
+                        <SkillInvocationText message={message} />
+                      ) : (
+                        // Templates retain the existing whole-invocation chip.
+                        <code
+                          className="chat-command-chip"
+                          data-source-start={0}
+                          data-source-end={message.content.length}
+                          title={String(message.content || "")}
+                        >
+                          {message.command}
+                        </code>
+                      )
                     ) : (
                       <LinkifiedText text={String(message.content || "")} attachments={message.attachments} />
                     )}
@@ -241,6 +307,7 @@ export const MessageRow = memo(function MessageRow({
         ) : null}
         {!editing && (hasAnswer || showRevisionPager) ? (
           <div className="message-actions">
+            <MessageTimestamp createdAt={message.createdAt} />
             {showRevisionPager ? (
               <div className="message-revision-pager" role="group" aria-label={t("chat.revisions")}>
                 <TooltipButton
@@ -282,11 +349,8 @@ export const MessageRow = memo(function MessageRow({
                 className="copy-btn icon"
                 tooltip={editLabel}
                 ariaLabel={editLabel}
-                disabled={isRunning}
-                onClick={() => {
-                  setEditValue(editSeed);
-                  setEditing(true);
-                }}
+                disabled={isRunning || loadingEdit}
+                onClick={() => void beginEdit()}
               >
                 <IconPencil size={13} />
               </TooltipButton>

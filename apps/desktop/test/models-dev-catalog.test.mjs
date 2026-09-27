@@ -4,11 +4,16 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
-import { apiStyleForAdapter, catalogModelIdsMatch, modelIdsMatch } from "@pi-desktop/shared";
-
+import {
+  apiStyleForAdapter,
+  bindingForCustomModelInfo,
+  catalogModelIdsMatch,
+  modelIdsMatch,
+} from "@pi-desktop/shared";
 import {
   MODELS_DEV_API_URL,
   ModelsDevCatalog,
+  catalogModelConfigFor,
   modelConfigFromModelsDev,
   modelInfoFromModelsDev,
   parseModelsDevCatalog,
@@ -159,6 +164,46 @@ test("cached matches remain scoped to the requested provider and endpoint", asyn
   }
 });
 
+test("unknown endpoints do not inherit ambiguous cross-provider metadata", async (t) => {
+  for (const order of [["alpha", "beta"], ["beta", "alpha"]]) {
+    const fixture = Object.fromEntries(order.map((key) => [key, {
+      api: `https://${key}.example/v1`,
+      models: {
+        "shared-model": {
+          id: "shared-model",
+          reasoning: key === "alpha",
+          limit: { context: key === "alpha" ? 128_000 : 32_000, output: 8_192 },
+        },
+      },
+    }]));
+    const catalog = await loadFixtureCatalog(t, fixture);
+    for (const modelId of ["shared-model", "proxy/shared-model"]) {
+      const unknown = { vendorKey: "custom", baseUrl: "https://relay.example/v1", modelId };
+      assert.equal(catalog.findModel(unknown), undefined, `ambiguous ${modelId} must miss`);
+      assert.equal(catalog.findModel(unknown), undefined, "ambiguous misses are cached");
+    }
+    const alpha = catalog.findModel({
+      vendorKey: "custom", baseUrl: "https://alpha.example/v1", modelId: "shared-model",
+    });
+    assert.equal(alpha?.providerKey, "alpha", "an exact endpoint scopes the lookup");
+    assert.equal(alpha?.reasoning, true);
+    assert.equal(alpha?.limit.context, 128_000);
+    const beta = catalog.findModel({ vendorKey: "beta", modelId: "shared-model" });
+    assert.equal(beta?.providerKey, "beta", "a known provider key scopes the lookup");
+    assert.equal(beta?.reasoning, false);
+    assert.equal(beta?.limit.context, 32_000);
+  }
+});
+
+test("an unknown endpoint can use a unique exact last-segment match", async (t) => {
+  const catalog = await loadFixtureCatalog(t, {
+    alpha: { models: { "shared-model": { id: "shared-model", reasoning: true } } },
+  });
+  assert.equal(catalog.findModel({
+    vendorKey: "custom", baseUrl: "https://relay.example/v1", modelId: "proxy/shared-model",
+  })?.providerKey, "alpha");
+});
+
 test("a known endpoint cannot borrow another provider's catalog model", async (t) => {
   const catalog = await loadFixtureCatalog(t, {
     alpha: { api: "https://alpha.example/v1", models: { "alpha-only": { id: "alpha-only" } } },
@@ -176,6 +221,19 @@ test("a shared catalog API prefers the explicitly selected vendor", async (t) =>
   const input = { vendorKey: "beta", baseUrl: "https://gateway.example/v1" };
   assert.equal(catalog.findModel({ ...input, modelId: "beta-only" })?.providerKey, "beta");
   assert.equal(catalog.findModel({ ...input, modelId: "alpha-only" }), undefined);
+});
+
+test("a shared catalog API with no vendor key cannot select the first publisher", async (t) => {
+  for (const order of [["alpha", "beta"], ["beta", "alpha"]]) {
+    const catalog = await loadFixtureCatalog(t, Object.fromEntries(order.map((key) => [key, {
+      api: "https://gateway.example/v1",
+      models: { "shared-model": { id: "shared-model", reasoning: key === "alpha",
+        limit: { context: key === "alpha" ? 128_000 : 32_000, output: 8_192 } } },
+    }])));
+    assert.equal(catalog.providerKeyForRow({ vendorKey: "custom", baseUrl: "https://gateway.example/v1" }), undefined);
+    assert.equal(catalog.findModel({ vendorKey: "custom", baseUrl: "https://gateway.example/v1", modelId: "shared-model" }), undefined);
+    assert.equal(catalog.findModel({ vendorKey: "beta", baseUrl: "https://gateway.example/v1", modelId: "shared-model" })?.providerKey, "beta");
+  }
 });
 
 test("a recognized endpoint takes priority over an unrelated vendor fallback", async (t) => {
@@ -248,111 +306,487 @@ test("model IDs match provider namespaces without matching model variants", () =
   assert.equal(modelIdsMatch("proxy/openai/gpt-4o", "openai/gpt-4o"), true);
   assert.equal(modelIdsMatch("openai/gpt-4o", "proxy/gpt-4o"), false);
 });
-test("catalog metadata IDs match exact proxy paths and supported variants", () => {
+test("catalog metadata IDs match only exact case-insensitive last segments", () => {
   for (const [catalogId, request] of [
     ["claude-opus-4.6", "proxy/claude-opus-4.6"],
-    ["claude-opus-4.6", "custom/claude-opus-4.6"],
-    ["claude-opus-4.6", "relay/claude-opus-4.6"],
-    ["claude-opus-4.6", "gateway-01/claude-opus-4.6"],
-    ["openai/gpt-4o", "hub/openai/gpt-4o"],
-    ["claude-opus-4.6", "proxy/claude-opus-4.6-thinking"],
-    ["claude-opus-4.6", "claude-opus-4.6:thinking"],
-    ["claude-opus-4.6", "proxy/claude-opus-4.6-agent"],
-    ["claude-opus-4.6", "proxy/claude-opus-4.6-latest"],
-    ["claude-opus-4.6", "proxy/claude-opus-4.6-agent-thinking"],
-    ["proxy/nested/claude-opus-4.6@us-east", "claude-opus-4.6-thinking"],
-    ["anthropic-claude-opus-4.6", "claude-opus-4.6@us-east"],
-    ["google/gemini-pro-latest", "gemini-pro"],
+    ["openai/gpt-4o", "hub/gpt-4o"],
+    ["google/gemini-2.5-flash", "openai/gemini-2.5-flash"],
+    ["proxy/nested/claude-opus-4.6", "other/CLAUDE-OPUS-4.6"],
+    ["gateway-a/foo", "gateway-b/foo"],
   ]) {
     assert.equal(catalogModelIdsMatch(catalogId, request), true, `${catalogId} / ${request}`);
     assert.equal(catalogModelIdsMatch(request, catalogId), true, `${request} / ${catalogId}`);
   }
 
   for (const [catalogId, request] of [
-    ["google/gemini-2.5-flash", "openai/gemini-2.5-flash"],
-    ["claude-opus-4.6", "myproxy-claude-opus-4.6"],
-    ["claude-opus-4.6", "myproxy-claude-opus-4.6-thinking"],
-    ["google/gemini-2.5-flash", "gemini-2.5-flash-high"],
-    ["google/gemini-2.5-flash", "gemini-2.5-flash-low"],
-    ["google/gemini-2.5-flash", "gemini-2.5-flash:minimal"],
-    ["claude-opus-5", "claude-opus-5-fast"],
-    ["gpt-4o", "gpt-4o-mini"],
-    ["gpt-4", "gpt-4o"],
-    ["model", "other-model"],
-    ["custom", "gemini-3.1-pro-preview-customtools"],
-    ["groq/whisper-large-v3", "deepseek-v3"],
-    ["vercel/bfl/flux-kontext-max", "qwen-max"],
-    ["alibaba/qwen3-asr-flash", "qwen-flash"],
-    ["openai/gpt-4o", "proxy/gpt-4o"],
-    ["google/gemini-2.5-flash", "proxy/gemini-2.5-flash"],
-    ["proxy/nested/claude-opus-4.6", "other/claude-opus-4.6"],
-    ["claude-opus-4-6-max", "qwen-max"],
+    ["claude-opus-4.6", "proxy/claude-opus-4.6-thinking"],
+    ["claude-opus-4.6", "claude-opus-4.6:thinking"],
+    ["claude-opus-4.6", "proxy/claude-opus-4.6-agent"],
+    ["claude-opus-4.6", "proxy/claude-opus-4.6-latest"],
+    ["anthropic-claude-opus-4.6", "claude-opus-4.6"],
+    ["google/gemini-pro-latest", "ag/gemini-pro-agent"],
+    ["foo", "foo-think"],
+    ["foo", "foo-agent"],
+    ["foo", "foo-latest"],
+    ["foo@us-east", "foo"],
   ]) {
     assert.equal(catalogModelIdsMatch(catalogId, request), false, `${catalogId} / ${request}`);
     assert.equal(catalogModelIdsMatch(request, catalogId), false, `${request} / ${catalogId}`);
   }
-  assert.equal(catalogModelIdsMatch("gateway-a/foo", "gateway-b/foo"), false);
-  assert.equal(catalogModelIdsMatch("foo", "foo-think"), true);
-  assert.equal(catalogModelIdsMatch("foo", "foo-agent"), true);
-  assert.equal(catalogModelIdsMatch("foo", "foo-latest"), true);
 });
 
-test("catalog lookup indexes exact path leaves and known vendor variants without broad aliases", async (t) => {
-  const ids = [
-    "model", "custom", "groq/whisper-large-v3", "vercel/bfl/flux-kontext-max",
-    "alibaba/qwen3-asr-flash", "proxy/nested/claude-opus-4.6@us-east",
-    "anthropic-claude-sonnet-4", "openai.gpt-4o", "google/gemini-2.5-flash",
-  ];
-  const catalog = await loadFixtureCatalog(t, {
-    gateway: { models: Object.fromEntries(ids.map((id) => [id, { id }])) },
-  });
-  for (const [request, expected] of [
-    ["other-model", undefined],
-    ["gemini-3.1-pro-preview-customtools", undefined],
-    ["deepseek-v3", undefined],
-    ["qwen-max", undefined],
-    ["qwen-flash", undefined],
-    ["myproxy-claude-opus-4.6", undefined],
-    ["gemini-2.5-flash-high", undefined],
-    ["gemini-2.5-flash-low", undefined],
-    ["claude-opus-4.6-thinking", "proxy/nested/claude-opus-4.6@us-east"],
-    ["proxy/claude-opus-4.6-thinking", undefined],
-    ["claude-sonnet-4-agent", "anthropic-claude-sonnet-4"],
-    ["proxy/gemini-2.5-flash", undefined],
-    ["gpt-4o@eu", "openai.gpt-4o"],
-  ]) {
-    assert.equal(catalog.findModel({ vendorKey: "custom", modelId: request })?.modelId, expected, request);
-  }
-  assert.equal(catalog.findModel({ vendorKey: "custom", modelId: "openai/gemini-2.5-flash" }), undefined);
-});
-
-test("matches supported proxy path and reasoning variants in catalog lookup", async (t) => {
-  const catalog = await loadFixtureCatalog(t);
-  for (const modelId of [
-    "proxy/claude-opus-4.6", "proxy/claude-opus-4.6-thinking",
-    "proxy/claude-opus-4.6-agent", "claude-opus-4.6:thinking",
-    "anthropic-claude-opus-4.6",
-  ]) {
-    const match = catalog.findModel({ vendorKey: "custom", modelId });
-    assert.equal(match?.modelId, "claude-opus-4.6", modelId);
-    assert.equal(match.reasoning, true);
-  }
-  for (const modelId of ["myproxy-claude-opus-4.6", "myproxy-claude-opus-4.6-thinking"]) {
-    assert.equal(catalog.findModel({ vendorKey: "custom", modelId }), undefined);
-  }
-});
-
-test("metadata lookup can share routed leaves and narrow suffix aliases without merging bindings", async (t) => {
+test("catalog lookup uses exact last segments and rejects ambiguous matches", async (t) => {
   const catalog = await loadFixtureCatalog(t, {
     gateway: { models: {
-      "gateway-a/foo": { id: "gateway-a/foo" },
-      "bar-agent": { id: "bar-agent" },
+      "model": { id: "model" },
+      "nested/unique-model": { id: "nested/unique-model", reasoning: true },
+      "google/gemini-pro-latest": { id: "google/gemini-pro-latest", reasoning: true },
+      "route-a/shared-leaf": { id: "route-a/shared-leaf", reasoning: true },
+      "route-b/shared-leaf": { id: "route-b/shared-leaf", reasoning: false },
+      "regional@us-east": { id: "regional@us-east" },
     } },
   });
-  assert.equal(modelIdsMatch("gateway-a/foo", "gateway-b/foo"), false);
-  assert.equal(modelIdsMatch("bar", "bar-agent"), false);
-  assert.equal(catalog.findModel({ modelId: "gateway-b/foo" }), undefined);
-  assert.equal(catalog.findModel({ modelId: "bar-thinking" })?.modelId, "bar-agent");
+
+  assert.equal(
+    catalog.findModel({ vendorKey: "custom", modelId: "proxy/UNIQUE-MODEL" })?.modelId,
+    "nested/unique-model",
+  );
+  assert.equal(catalog.findModel({ vendorKey: "custom", modelId: "other/model" })?.modelId, "model");
+  assert.equal(catalog.findModel({ vendorKey: "custom", modelId: "proxy/shared-leaf" }), undefined);
+  assert.equal(catalog.findModel({ vendorKey: "gateway", modelId: "proxy/shared-leaf" }), undefined);
+  assert.equal(catalog.findModel({ vendorKey: "custom", modelId: "ag/gemini-pro-agent" }), undefined);
+  assert.equal(catalog.findModel({ vendorKey: "custom", modelId: "regional" }), undefined);
+  assert.equal(
+    catalog.findModel({ vendorKey: "custom", modelId: "proxy/regional@us-east" })?.modelId,
+    "regional@us-east",
+  );
+});
+
+test("ambiguous leaf matches prefer one official provider", async (t) => {
+  for (const order of [["relay", "openai"], ["openai", "relay"]]) {
+    const definitions = {
+      relay: { models: { "route/shared-leaf": {
+        id: "route/shared-leaf", reasoning: false, tool_call: false,
+        limit: { context: 32_000 },
+      } } },
+      openai: { models: { "shared-leaf": {
+        id: "shared-leaf", reasoning: true, tool_call: true,
+        reasoning_options: [{ type: "effort", values: ["low", "medium", "high"] }],
+        limit: { context: 128_000 },
+      } } },
+    };
+    const catalog = await loadFixtureCatalog(t, Object.fromEntries(
+      order.map((key) => [key, definitions[key]]),
+    ));
+    const match = catalog.findModel({ vendorKey: "custom", modelId: "proxy/shared-leaf" });
+    assert.equal(match?.providerKey, "openai");
+    assert.equal(match?.reasoning, true);
+    assert.equal(match?.limit.context, 128_000);
+  }
+});
+
+test("official source keys ignore a cloud publisher carrying another vendor's model", async (t) => {
+  const catalog = await loadFixtureCatalog(t, {
+    xai: { models: { "grok-4.6": {
+      id: "grok-4.6", reasoning: true, tool_call: true,
+      reasoning_options: [{ type: "effort", values: ["low", "medium", "high", "xhigh"] }],
+      limit: { context: 500_000 },
+    } } },
+    "google-vertex": { models: { "xai/grok-4.6": {
+      id: "xai/grok-4.6", reasoning: true, tool_call: true,
+      limit: { context: 524_288 },
+    } } },
+    relay: { models: { "x-ai/grok-4.6": {
+      id: "x-ai/grok-4.6", reasoning: false, tool_call: false,
+    } } },
+  });
+  const match = catalog.findModel({ vendorKey: "custom", modelId: "ycj/grok-4.6" });
+  assert.equal(match?.providerKey, "xai");
+  assert.equal(match?.limit.context, 500_000);
+});
+
+test("ambiguous non-official leaf matches share unanimous capabilities", async (t) => {
+  const catalog = await loadFixtureCatalog(t, {
+    relayA: { models: { "route-a/shared-leaf": {
+      id: "route-a/shared-leaf", reasoning: true, tool_call: true,
+      reasoning_options: [{ type: "effort", values: ["low", "high"] }],
+      modalities: { input: ["text", "image"], output: ["text"] },
+      limit: { context: 64_000, output: 8_192 },
+    } } },
+    relayB: { models: { "route-b/shared-leaf": {
+      id: "route-b/shared-leaf", reasoning: true, tool_call: true,
+      reasoning_options: [{ type: "effort", values: ["low", "high"] }],
+      modalities: { input: ["image", "text"], output: ["text"] },
+      limit: { context: 128_000, output: 16_384 },
+    } } },
+  });
+  const match = catalog.findModel({ vendorKey: "custom", modelId: "proxy/shared-leaf" });
+  assert.ok(match);
+  assert.equal(match.reasoning, true);
+  assert.equal(match.toolCall, true);
+  assert.deepEqual(match.thinkingLevels, ["low", "high"]);
+  assert.deepEqual(match.modalities.input.toSorted(), ["image", "text"]);
+});
+
+test("ambiguous leaf matches with conflicting capabilities remain unmatched", async (t) => {
+  const catalog = await loadFixtureCatalog(t, {
+    relayA: { models: { "route-a/shared-leaf": {
+      id: "route-a/shared-leaf", reasoning: true, tool_call: true,
+    } } },
+    relayB: { models: { "route-b/shared-leaf": {
+      id: "route-b/shared-leaf", reasoning: false, tool_call: true,
+    } } },
+  });
+  assert.equal(
+    catalog.findModel({ vendorKey: "custom", modelId: "proxy/shared-leaf" }),
+    undefined,
+  );
+});
+
+test("gemini agent routes do not collapse to gemini latest catalog entries", async (t) => {
+  const catalog = await loadFixtureCatalog(t, {
+    google: { models: {
+      "gemini-pro-latest": { id: "gemini-pro-latest", reasoning: true },
+    } },
+  });
+  assert.equal(
+    catalog.findModel({ vendorKey: "custom", modelId: "ag/gemini-pro-agent" }),
+    undefined,
+  );
+});
+
+test("catalog lookup never collapses reasoning or release suffix variants", async (t) => {
+  const catalog = await loadFixtureCatalog(t);
+  const exact = catalog.findModel({ vendorKey: "custom", modelId: "proxy/claude-opus-4.6" });
+  assert.equal(exact?.modelId, "claude-opus-4.6");
+  assert.equal(exact.reasoning, true);
+
+  for (const modelId of [
+    "proxy/claude-opus-4.6-thinking",
+    "proxy/claude-opus-4.6-agent",
+    "proxy/claude-opus-4.6-latest",
+    "claude-opus-4.6:thinking",
+    "anthropic-claude-opus-4.6",
+  ]) {
+    assert.equal(catalog.findModel({ vendorKey: "custom", modelId }), undefined, modelId);
+  }
+});
+
+/*
+  A gateway is indexed by models.dev under the vendor that owns the weights, so
+  an endpoint serving `Vendor/Model` ids often has no record of its own while
+  several other publishers state the identical id. Issue #938: those rows used
+  to fall back to the generic 128k text-only shape, hiding a correct context
+  window and tool support that the catalog does publish.
+*/
+test("an id the row's own catalog provider lacks borrows a unanimous exact-id record", async (t) => {
+  const catalog = await loadFixtureCatalog(t, {
+    gateway: { api: "https://gateway.example/v1", models: { "gateway/own-model": { id: "gateway/own-model" } } },
+    publisherA: { models: { "Vendor/Shared-Model-0731": {
+      id: "Vendor/Shared-Model-0731", tool_call: true, reasoning: true,
+      modalities: { input: ["text", "image"], output: ["text"] },
+      attachment: true, family: "shared",
+      limit: { context: 262_144, output: 65_536 },
+    } } },
+    publisherB: { models: { "Vendor/Shared-Model-0731": {
+      id: "Vendor/Shared-Model-0731", tool_call: true, reasoning: true,
+      modalities: { input: ["text", "image"], output: ["text"] },
+      attachment: true, family: "shared",
+      limit: { context: 1_048_576, output: 32_768 },
+    } } },
+  });
+  const match = catalog.findModel({
+    vendorKey: "gateway",
+    baseUrl: "https://gateway.example/v1",
+    modelId: "Vendor/Shared-Model-0731",
+  });
+  assert.ok(match, "a published exact id must not drop to the generic shape");
+  assert.equal(match.toolCall, true);
+  assert.equal(match.reasoning, true);
+  const info = modelInfoFromModelsDev(match, "provider-1");
+  assert.equal(info.capabilities.includes("tools"), true);
+  assert.equal(info.capabilities.includes("vision"), true);
+  // Limits are the medians the publishers state; an even count takes the lower
+  // middle, so a borrow never rounds a window up on its own.
+  assert.equal(match.limit.context, 262_144);
+  assert.equal(match.limit.output, 32_768);
+});
+
+test("a borrowed record under-claims instead of asserting one publisher's extras", async (t) => {
+  // Both publishers agree on tool support, so the id is borrowable. They differ
+  // on vision, reasoning and structured output, so none of those may be
+  // reported: the borrow may only claim what every publisher states.
+  const catalog = await loadFixtureCatalog(t, {
+    gateway: { api: "https://gateway.example/v1", models: { "gateway/own-model": { id: "gateway/own-model" } } },
+    publisherA: { models: { "Vendor/Mixed": {
+      id: "Vendor/Mixed", tool_call: true, reasoning: true, structured_output: true,
+      modalities: { input: ["text", "image"], output: ["text"] }, attachment: true,
+      limit: { context: 262_144 },
+    } } },
+    publisherB: { models: { "Vendor/Mixed": {
+      id: "Vendor/Mixed", tool_call: true, reasoning: false, structured_output: false,
+      modalities: { input: ["text"], output: ["text"] }, attachment: false,
+      limit: { context: 262_144 },
+    } } },
+  });
+  const match = catalog.findModel({
+    vendorKey: "gateway",
+    baseUrl: "https://gateway.example/v1",
+    modelId: "Vendor/Mixed",
+  });
+  assert.ok(match, "unanimous tool support is enough to borrow");
+  assert.equal(match.toolCall, true);
+  assert.equal(match.reasoning, false);
+  // A capability the publishers do not state unanimously is left unasserted
+  // (`undefined` means "no published answer"), never claimed from one source.
+  assert.equal(match.structuredOutput, undefined);
+  assert.equal(match.attachment, undefined);
+  assert.deepEqual(match.modalities.input, ["text"]);
+  const info = modelInfoFromModelsDev(match, "provider-1");
+  assert.equal(info.capabilities.includes("vision"), false);
+  assert.equal(info.capabilities.includes("reasoning"), false);
+});
+
+test("an even split on tool support leaves conflicting leaves unmatched", async (t) => {
+  // Conflicting capability signatures (tool_call) mean shared-capabilities enrichment
+  // must miss — no majority/consensus borrow for an unanchored / empty-gateway row.
+  const catalog = await loadFixtureCatalog(t, {
+    gateway: { api: "https://gateway.example/v1", models: {} },
+    publisherA: { models: { "Vendor/Split": { id: "Vendor/Split", tool_call: true, limit: { context: 262_144 } } } },
+    publisherB: { models: { "Vendor/Split": { id: "Vendor/Split", tool_call: false, limit: { context: 262_144 } } } },
+  });
+  assert.equal(catalog.findModel({
+    vendorKey: "gateway",
+    baseUrl: "https://gateway.example/v1",
+    modelId: "Vendor/Split",
+  }), undefined);
+});
+
+test("a borrowed record never replaces what the row's own catalog provider publishes", async (t) => {
+  const catalog = await loadFixtureCatalog(t, {
+    gateway: { api: "https://gateway.example/v1", models: {
+      "Vendor/Shared-Model": { id: "Vendor/Shared-Model", tool_call: false, limit: { context: 200_000 } },
+    } },
+    publisherA: { models: {
+      "Vendor/Shared-Model": { id: "Vendor/Shared-Model", tool_call: true, limit: { context: 1_048_576 } },
+    } },
+  });
+  const match = catalog.findModel({
+    vendorKey: "gateway",
+    baseUrl: "https://gateway.example/v1",
+    modelId: "Vendor/Shared-Model",
+  });
+  assert.equal(match?.providerKey, "gateway");
+  assert.equal(match.limit.context, 200_000);
+  assert.equal(match.toolCall, false);
+});
+
+test("publishers that disagree about capabilities remain unmatched", async (t) => {
+  const catalog = await loadFixtureCatalog(t, {
+    gateway: { api: "https://gateway.example/v1", models: {} },
+    publisherA: { models: { "Vendor/Disputed": {
+      id: "Vendor/Disputed", tool_call: true, reasoning: true, limit: { context: 262_144 },
+    } } },
+    publisherB: { models: { "Vendor/Disputed": {
+      id: "Vendor/Disputed", tool_call: false, reasoning: false, limit: { context: 262_144 },
+    } } },
+  });
+  assert.equal(catalog.findModel({
+    vendorKey: "gateway",
+    baseUrl: "https://gateway.example/v1",
+    modelId: "Vendor/Disputed",
+  }), undefined);
+});
+
+test("a majority of publishers with conflicting capability signatures stays unmatched", async (t) => {
+  // #1047 does not majority-vote across publishers for an empty/unanchored row.
+  // Conflicting tool_call signatures ⇒ unmatched.
+  const catalog = await loadFixtureCatalog(t, {
+    gateway: { api: "https://gateway.example/v1", models: {} },
+    publisherA: { models: { "Vendor/Majority": { id: "Vendor/Majority", tool_call: true, limit: { context: 262_144 } } } },
+    publisherB: { models: { "Vendor/Majority": { id: "Vendor/Majority", tool_call: true, limit: { context: 1_048_576 } } } },
+    publisherC: { models: { "Vendor/Majority": { id: "Vendor/Majority", tool_call: true, limit: { context: 1_048_576 } } } },
+    publisherD: { models: { "Vendor/Majority": { id: "Vendor/Majority", tool_call: false, limit: { context: 1_048_576 } } } },
+  });
+  assert.equal(catalog.findModel({
+    vendorKey: "gateway",
+    baseUrl: "https://gateway.example/v1",
+    modelId: "Vendor/Majority",
+  }), undefined);
+});
+
+test("conflicting reseller and shipped records for a leaf stay unmatched without an official", async (t) => {
+  // deepseek is not an official/source family for #1047 disambiguation, and the
+  // capability signatures conflict, so an unanchored relay must miss.
+  const catalog = await loadFixtureCatalog(t, {
+    gateway: { api: "https://gateway.example/v1", models: {} },
+    deepseek: { models: { "shared-model": {
+      id: "shared-model", tool_call: true, limit: { context: 1_000_000, output: 393_216 },
+    } } },
+    resellerA: { models: { "shared-model": {
+      id: "shared-model", tool_call: false, limit: { context: 128_000, output: 8_192 },
+    } } },
+    resellerB: { models: { "shared-model": {
+      id: "shared-model", tool_call: false, limit: { context: 131_072, output: 8_192 },
+    } } },
+  });
+  assert.equal(catalog.findModel({
+    vendorKey: "custom",
+    baseUrl: "https://relay.example/v1",
+    modelId: "shared-model",
+  }), undefined);
+});
+
+test("resellers still answer for an id no shipped publisher states", async (t) => {
+  // The preference above is not a filter: an id only resellers publish would
+  // otherwise be shown as a generic 128k text-only row.
+  const catalog = await loadFixtureCatalog(t, {
+    gateway: { api: "https://gateway.example/v1", models: {} },
+    resellerA: { models: { "reseller-only-model": {
+      id: "reseller-only-model", tool_call: true, limit: { context: 262_144 },
+    } } },
+    resellerB: { models: { "reseller-only-model": {
+      id: "reseller-only-model", tool_call: true, limit: { context: 262_144 },
+    } } },
+  });
+  const match = catalog.findModel({
+    vendorKey: "custom",
+    baseUrl: "https://relay.example/v1",
+    modelId: "reseller-only-model",
+  });
+  assert.ok(match, "a published id must not drop to the generic shape");
+  assert.equal(match.toolCall, true);
+  assert.equal(match.limit.context, 262_144);
+});
+
+test("a route prefix reaches a unique leaf while deployment markers stay unmatched", async (t) => {
+  // Exact last-segment match allows `test/mimo-v2.5` → `mimo-v2.5`.
+  // Markers like `-thinking` / `-test` are part of the leaf and do not strip.
+  const catalog = await loadFixtureCatalog(t, {
+    gateway: { api: "https://gateway.example/v1", models: {} },
+    xiaomi: { models: {
+      "mimo-v2.5": {
+        id: "mimo-v2.5", tool_call: true,
+        modalities: { input: ["text", "image"], output: ["text"] },
+        limit: { context: 1_048_576, output: 131_072 },
+      },
+      "mimo-v2.5-pro": {
+        id: "mimo-v2.5-pro", tool_call: true, limit: { context: 1_048_576, output: 131_072 },
+      },
+    } },
+  });
+  const relay = (modelId) =>
+    catalog.findModel({ vendorKey: "custom", baseUrl: "https://relay.example/v1", modelId });
+
+  for (const served of ["test/mimo-v2.5", "mimo-v2.5"]) {
+    assert.equal(relay(served)?.modelId, "mimo-v2.5", `${served} reads the published model`);
+    assert.equal(relay(served)?.limit.context, 1_048_576);
+  }
+  const info = modelInfoFromModelsDev(relay("test/mimo-v2.5"), "provider-1");
+  assert.ok(info.capabilities.includes("vision"));
+
+  assert.equal(relay("mimo-v2.5-thinking"), undefined);
+  assert.equal(relay("test/mimo-v2.5-pro-test"), undefined);
+  assert.equal(relay("mimo-v2.5-asr"), undefined);
+});
+
+test("a shipped publisher answers first for a row anchored to a reseller", async (t) => {
+  // The row's own publisher is known and publishes nothing for this id, so the
+  // borrow runs — and it reads the publisher the app ships before the resellers
+  // that also carry the id.
+  const catalog = await loadFixtureCatalog(t, {
+    reseller: { api: "https://reseller.example/v1", models: { "reseller/own": { id: "reseller/own" } } },
+    xai: { models: { "Vendor/Model": {
+      id: "Vendor/Model", tool_call: true, limit: { context: 500_000, output: 500_000 },
+    } } },
+    otherA: { models: { "Vendor/Model": {
+      id: "Vendor/Model", tool_call: false, limit: { context: 128_000, output: 8_192 },
+    } } },
+    otherB: { models: { "Vendor/Model": {
+      id: "Vendor/Model", tool_call: false, limit: { context: 131_072, output: 8_192 },
+    } } },
+  });
+  const match = catalog.findModel({
+    vendorKey: "reseller",
+    baseUrl: "https://reseller.example/v1",
+    modelId: "Vendor/Model",
+  });
+  assert.equal(match?.providerKey, "xai", "the shipped publisher's record answers");
+  assert.equal(match.toolCall, true);
+  assert.equal(match.limit.context, 500_000);
+  assert.equal(match.limit.output, 500_000);
+});
+
+test("ambiguous same-leaf spellings with conflicting modalities stay unmatched", async (t) => {
+  // `mimo-v2.5` and `XiaomiMiMo/MiMo-V2.5` share a case-insensitive leaf but
+  // disagree on modalities, and neither publisher is an official/source family.
+  const catalog = await loadFixtureCatalog(t, {
+    gateway: { api: "https://gateway.example/v1", models: {} },
+    xiaomi: { models: { "mimo-v2.5": {
+      id: "mimo-v2.5", tool_call: true,
+      modalities: { input: ["text", "image", "audio"], output: ["text"] },
+      limit: { context: 1_048_576, output: 131_072 },
+    } } },
+    huggingface: { models: { "XiaomiMiMo/MiMo-V2.5": {
+      id: "XiaomiMiMo/MiMo-V2.5", tool_call: true,
+      modalities: { input: ["text"], output: ["text"] },
+      limit: { context: 1_048_576, output: 131_072 },
+    } } },
+  });
+  assert.equal(catalog.findModel({
+    vendorKey: "custom",
+    baseUrl: "https://relay.example/v1",
+    modelId: "mimo-v2.5",
+  }), undefined);
+});
+
+test("unique leaf enrichment coexists with exact-id borrowing and unknown misses", async (t) => {
+  const catalog = await loadFixtureCatalog(t, {
+    gateway: { api: "https://gateway.example/v1", models: {} },
+    publisherA: { models: {
+      "Vendor/Known": { id: "Vendor/Known", limit: { context: 262_144 } },
+      "Vendor/Known-2507": { id: "Vendor/Known-2507", limit: { context: 131_072 } },
+    } },
+  });
+  const input = { vendorKey: "gateway", baseUrl: "https://gateway.example/v1" };
+  // Near-miss and unknown ids do not reuse a sibling's limits.
+  assert.equal(catalog.findModel({ ...input, modelId: "Vendor/Known-3000" }), undefined);
+  assert.equal(catalog.findModel({ ...input, modelId: "unknown-model-xyz" }), undefined);
+  // A different route with the same unique final segment is valid enrichment.
+  assert.equal(catalog.findModel({ ...input, modelId: "Other/Known" })?.modelId, "Vendor/Known");
+  // Exact ids still resolve, including a case-only difference.
+  assert.equal(catalog.findModel({ ...input, modelId: "vendor/known" })?.limit.context, 262_144);
+  assert.equal(catalog.findModel({ ...input, modelId: "Vendor/Known" })?.limit.context, 262_144);
+  assert.equal(catalog.findModel({ ...input, modelId: "Vendor/Known-2507" })?.limit.context, 131_072);
+  // The sibling exists under a different id, so nothing is borrowed through it.
+  assert.equal(
+    catalog.findModel({ ...input, modelId: "Vendor/Known-2507" })?.modelId,
+    "Vendor/Known-2507",
+  );
+});
+
+test("a provider sharing the row's endpoint owns its own negative answer", async (t) => {
+  // Two names for one endpoint: an id published only by the sibling is not
+  // borrowed, because that sibling was already consulted and does not list it.
+  const catalog = await loadFixtureCatalog(t, {
+    alpha: { api: "https://gateway.example/v1", models: { "alpha-only": { id: "alpha-only" } } },
+    beta: { api: "https://gateway.example/v1", models: { "beta-only": { id: "beta-only" } } },
+  });
+  const input = { vendorKey: "beta", baseUrl: "https://gateway.example/v1" };
+  assert.equal(catalog.findModel({ ...input, modelId: "alpha-only" }), undefined);
+  // A different endpoint is a genuinely independent source and still transfers.
+  const other = await loadFixtureCatalog(t, {
+    gateway: { api: "https://gateway.example/v1", models: {} },
+    publisherA: { models: { "Vendor/Elsewhere": { id: "Vendor/Elsewhere", limit: { context: 262_144 } } } },
+  });
+  assert.equal(
+    other.findModel({
+      vendorKey: "gateway",
+      baseUrl: "https://gateway.example/v1",
+      modelId: "Vendor/Elsewhere",
+    })?.limit.context,
+    262_144,
+  );
 });
 
 test("models.dev records retain all published model parameters and modalities", () => {
@@ -1066,4 +1500,256 @@ test("the wire API style is derived from the published adapter package", () => {
   // The long tail of gateways is OpenAI-compatible chat completions.
   assert.equal(apiStyleForAdapter("@ai-sdk/openai-compatible"), "chat_completions");
   assert.equal(apiStyleForAdapter(undefined), "chat_completions");
+});
+
+// A custom Anthropic Messages gateway (unknown base URL, vendorKey "custom")
+// serving a Claude id that several catalog providers publish with differing
+// reasoning options. The lookup refuses to pick one publisher, but the thinking
+// wire shape of an exact Anthropic id is Anthropic's own (#990).
+const ambiguousClaudeFixture = {
+  anthropic: {
+    name: "Anthropic",
+    npm: "@ai-sdk/anthropic",
+    models: {
+      "claude-opus-5-5": {
+        id: "claude-opus-5-5",
+        name: "Claude Opus 5.5",
+        reasoning: true,
+        reasoning_options: [{ type: "effort", values: ["low", "medium", "high", "xhigh", "max"] }],
+        tool_call: true,
+        modalities: { input: ["text", "image"], output: ["text"] },
+        limit: { context: 1_000_000, output: 128_000 },
+      },
+    },
+  },
+  requesty: {
+    name: "Requesty",
+    npm: "@ai-sdk/openai-compatible",
+    api: "https://router.requesty.ai/v1",
+    models: {
+      "claude-opus-5-5": {
+        id: "claude-opus-5-5",
+        name: "Claude Opus 5.5",
+        reasoning: true,
+        reasoning_options: [
+          { type: "effort", values: ["none", "low", "medium", "high", "max"] },
+          { type: "budget_tokens" },
+        ],
+        tool_call: true,
+        modalities: { input: ["text"], output: ["text"] },
+        limit: { context: 200_000, output: 64_000 },
+      },
+      "glm-5": {
+        id: "glm-5",
+        name: "GLM 5",
+        reasoning: true,
+        reasoning_options: [{ type: "effort", values: ["low", "high"] }],
+        tool_call: true,
+        modalities: { input: ["text"], output: ["text"] },
+        limit: { context: 200_000, output: 32_000 },
+      },
+    },
+  },
+};
+
+const customGateway = {
+  vendorKey: "custom",
+  baseUrl: "https://gateway.example/v1",
+};
+
+test("a custom gateway enriches an ambiguous Claude leaf from the official provider", async (t) => {
+  const catalog = await loadFixtureCatalog(t, ambiguousClaudeFixture);
+  const config = catalogModelConfigFor(catalog, {
+    ...customGateway,
+    apiStyle: "anthropic_messages",
+    modelId: "claude-opus-5-5",
+  });
+
+  assert.equal(config.source, "models.dev");
+  assert.equal(config.contextWindow, 1_000_000);
+  assert.equal(config.maxTokens, 128_000);
+  assert.equal(config.reasoning, true);
+  assert.deepEqual(config.reasoningOptions, [
+    { type: "effort", values: ["low", "medium", "high", "xhigh", "max"] },
+  ]);
+  assert.deepEqual(config.thinkingLevelMap, {
+    low: "low",
+    medium: "medium",
+    high: "high",
+    xhigh: "xhigh",
+    max: "max",
+    off: null,
+  });
+});
+
+test("official-provider enrichment is API-style independent while unknown ids stay generic", async (t) => {
+  const catalog = await loadFixtureCatalog(t, ambiguousClaudeFixture);
+  const completions = catalogModelConfigFor(catalog, {
+    ...customGateway,
+    apiStyle: "chat_completions",
+    modelId: "claude-opus-5-5",
+  });
+  assert.equal(completions.source, "models.dev");
+  assert.equal(completions.contextWindow, 1_000_000);
+  assert.deepEqual(completions.reasoningOptions, [
+    { type: "effort", values: ["low", "medium", "high", "xhigh", "max"] },
+  ]);
+
+  // An id absent from every publisher stays generic, even on Anthropic Messages.
+  const unlisted = catalogModelConfigFor(catalog, {
+    ...customGateway,
+    apiStyle: "anthropic_messages",
+    modelId: "unlisted-reasoning-model",
+  });
+  assert.equal(unlisted.source, "generic");
+  assert.equal(unlisted.reasoningOptions, undefined);
+  assert.equal(unlisted.thinkingLevelMap, undefined);
+
+  // Aliases of a Claude id are not an exact Anthropic id.
+  const renamed = catalogModelConfigFor(catalog, {
+    ...customGateway,
+    apiStyle: "anthropic_messages",
+    modelId: "my-claude-opus-5-5-thinking",
+  });
+  assert.equal(renamed.reasoningOptions, undefined);
+});
+
+test("a resolved catalog record still wins over the Anthropic thinking fallback", async (t) => {
+  const catalog = await loadFixtureCatalog(t, ambiguousClaudeFixture);
+  const config = catalogModelConfigFor(catalog, {
+    vendorKey: "requesty",
+    baseUrl: "https://router.requesty.ai/v1",
+    apiStyle: "anthropic_messages",
+    modelId: "claude-opus-5-5",
+  });
+  assert.equal(config.source, "models.dev");
+  assert.equal(config.contextWindow, 200_000);
+  assert.ok(config.reasoningOptions?.some((option) => option.type === "budget_tokens"));
+});
+
+/*
+  Release stamps in the published catalog.
+
+  A gateway serves `mify/mimo-v2.5-pro-0731` while models.dev indexes the model
+  under the id that owns the weights. The alias only ever borrows metadata: the
+  id the row is addressed with stays the discovery result.
+*/
+test("a dated snapshot leaf does not borrow an undated published model", async (t) => {
+  const catalog = await loadFixtureCatalog(t, {
+    mify: {
+      api: "https://api.mify.example/v1",
+      models: {
+        "mimo-v2.5-pro": {
+          id: "mimo-v2.5-pro",
+          name: "MiMo v2.5 Pro",
+          reasoning: true,
+          tool_call: true,
+          limit: { context: 262_144, output: 32_768 },
+        },
+      },
+    },
+  });
+  assert.equal(
+    catalog.findModel({ vendorKey: "mify", modelId: "mify/mimo-v2.5-pro-0731" }),
+    undefined,
+  );
+});
+
+test("exact published leaves resolve without release-stamp aliasing", async (t) => {
+  const catalog = await loadFixtureCatalog(t, {
+    alpha: { api: "https://alpha.example/v1", models: {
+      "foo-v2": { id: "foo-v2", limit: { context: 32_000 } },
+      "foo-v2-0731": { id: "foo-v2-0731", limit: { context: 128_000 } },
+    } },
+    beta: { api: "https://beta.example/v1", models: {
+      "foo-v2": { id: "foo-v2", limit: { context: 64_000 } },
+    } },
+  });
+  const exact = catalog.findModel({ vendorKey: "alpha", modelId: "foo-v2-0731" });
+  assert.equal(exact?.modelId, "foo-v2-0731");
+  assert.equal(exact?.limit.context, 128_000);
+
+  // Unpublished stamps do not strip down to a shorter sibling.
+  assert.equal(catalog.findModel({ vendorKey: "alpha", modelId: "foo-v2-0815" }), undefined);
+
+  // Same leaf, identical capabilities (limits are not part of the signature) ⇒
+  // shared-capabilities enrichment with the lower median window.
+  const shared = catalog.findModel({
+    vendorKey: "custom",
+    baseUrl: "https://relay.example/v1",
+    modelId: "foo-v2",
+  });
+  assert.equal(shared?.limit.context, 32_000);
+
+  // A uniquely published dated leaf still enriches.
+  const published = catalog.findModel({
+    vendorKey: "custom",
+    baseUrl: "https://relay.example/v1",
+    modelId: "foo-v2-0731",
+  });
+  assert.equal(published?.providerKey, "alpha");
+  assert.equal(published?.limit.context, 128_000);
+});
+
+/*
+  A custom endpoint is often the same publisher on another path.
+
+  The reported failure: a custom row at `https://open.bigmodel.cn/api/v1` listed
+  its models but every one of them showed generic defaults, because provider
+  matching only accepted models.dev's own path for that host.
+*/
+test("a custom endpoint on a uniquely published host inherits that publisher", async (t) => {
+  const catalog = await loadFixtureCatalog(t, {
+    alpha: {
+      api: "https://alpha.example/api/paas/v4",
+      models: {
+        "glm-5.3": {
+          id: "glm-5.3",
+          reasoning: true,
+          tool_call: true,
+          limit: { context: 1_000_000, output: 131_072 },
+        },
+      },
+    },
+  });
+  const model = catalog.findModel({
+    vendorKey: "custom",
+    baseUrl: "https://alpha.example/api/v1",
+    modelId: "glm-5.3",
+  });
+  assert.equal(model?.providerKey, "alpha");
+  assert.equal(model?.limit.context, 1_000_000);
+  assert.equal(model?.toolCall, true);
+
+  // The whole row's records are reachable, not just the one id.
+  assert.equal(
+    catalog.modelsForProvider({ vendorKey: "custom", baseUrl: "https://alpha.example/api/v1", providerId: "row" }).length,
+    1,
+  );
+});
+
+test("a host two publishers share leaves conflicting leaves unmatched", async (t) => {
+  const catalog = await loadFixtureCatalog(t, {
+    alpha: {
+      api: "https://shared.example/api/paas/v4",
+      models: { "glm-5.3": { id: "glm-5.3", reasoning: true, limit: { context: 1_000_000 } } },
+    },
+    beta: {
+      api: "https://shared.example/api/coding/v4",
+      models: { "glm-5.3": { id: "glm-5.3", reasoning: false, limit: { context: 32_000 } } },
+    },
+  });
+  assert.equal(catalog.findModel({
+    vendorKey: "custom",
+    baseUrl: "https://shared.example/v1",
+    modelId: "glm-5.3",
+  }), undefined);
+  // Naming the publisher still resolves it to that publisher's own record.
+  const alpha = catalog.findModel({
+    vendorKey: "alpha",
+    baseUrl: "https://shared.example/v1",
+    modelId: "glm-5.3",
+  });
+  assert.equal(alpha?.providerKey, "alpha");
+  assert.equal(alpha?.limit.context, 1_000_000);
 });

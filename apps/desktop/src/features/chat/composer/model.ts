@@ -8,11 +8,11 @@ import type {
 } from "@pi-desktop/shared";
 import {
   isSessionThinkingLevel,
-  modelIdsMatch,
   PERMISSION_MODES,
   sessionThinkingMenuLevels,
 } from "@pi-desktop/shared";
-import { providerThinkingLevels } from "../../../lib/session-thinking";
+import { sameComposerModelId } from "../../../lib/composer-models.ts";
+import { providerThinkingLevels } from "../../../lib/session-thinking.ts";
 
 export const COMPOSER_MIN_HEIGHT_PX = 28;
 export const COMPOSER_MAX_VISIBLE_ROWS = 7;
@@ -38,7 +38,7 @@ export const MODE_LABEL_KEYS: Record<Mode, string> = {
   goal: "settings.modeGoal",
 };
 
-export { PERMISSION_MODE_I18N_KEYS } from "../../../lib/permission-mode-labels";
+export { PERMISSION_MODE_I18N_KEYS } from "../../../lib/permission-mode-labels.ts";
 
 export const THINKING_LEVELS: readonly ThinkingLevel[] = [
   "off",
@@ -65,7 +65,7 @@ export type ComposerFileReference = {
   token?: string;
 };
 
-export type ComposerMenuView = "root" | "model" | "thinking";
+export type ComposerMenuView = "root" | "model";
 
 export type PromptEnhancementError = {
   message: string;
@@ -126,15 +126,32 @@ export function thinkingProviderForModel(
   modelCatalog: readonly ModelInfo[] | undefined,
 ): ProviderPublic | null | undefined {
   if (!provider || !modelId) return provider;
-  const model = modelCatalog?.find((candidate) => modelIdsMatch(candidate.modelId, modelId));
-  if (!model) return provider;
+  const model = modelCatalog?.find((candidate) => sameComposerModelId(candidate.modelId, modelId));
 
   const binding = provider.models.find((candidate) =>
-    modelIdsMatch(candidate.id, model.modelId),
+    sameComposerModelId(candidate.id, modelId),
   );
   const configuredLevels = binding
     ? THINKING_LEVELS.filter((level) => binding.thinkingLevels.includes(level))
     : undefined;
+
+  if (!model) {
+    // No catalog match: all thinking levels selectable, default off.
+    // A binding override still takes precedence when present.
+    // An empty binding is the generic seed for an unknown model, not an
+    // explicit disable; `off` is the persisted opt-out for that case.
+    const unmatchedLevels = configuredLevels?.length ? configuredLevels : undefined;
+    const supportsReasoning = unmatchedLevels
+      ? unmatchedLevels.some((level) => level !== "off")
+      : true;
+    return {
+      ...provider,
+      supportsReasoning,
+      supportedThinkingLevels:
+        unmatchedLevels ?? [...THINKING_LEVELS],
+    };
+  }
+
   const supportsReasoning = configuredLevels
     ? configuredLevels.some((level) => level !== "off")
     : model.reasoning === true || model.capabilities.includes("reasoning");

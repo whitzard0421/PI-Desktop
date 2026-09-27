@@ -77,11 +77,10 @@ export type StartupDependencies = {
   updater: AppUpdaterController;
   modelsDevCatalog: ModelsDevCatalog;
   plugins: PluginRuntime;
-  activeTurns: Map<string, string>;
   /**
    * Shared busy check from `runtime/session-coordination.ts`. The queue must
    * stay held while a turn's announcement is still running, so this cannot be
-   * derived here from `activeTurns` alone.
+   * be derived from the startup state alone.
    */
   isSessionBusy: (sessionId: string) => boolean;
   getHost: () => HostProcess | null;
@@ -102,6 +101,8 @@ export type StartupDependencies = {
     developerMode?: unknown;
   } | null) => void;
   applyDeveloperMode: (settings?: { developerMode?: unknown } | null) => void;
+  applyPreventScreenSleep: (settings?: { preventScreenSleep?: unknown } | null) => void;
+  applyKeepAwakeWhileRunning: (settings?: { keepAwakeWhileRunning?: unknown } | null) => void;
   applyPluginLauncherShortcut: (keybindings?: KeybindingOverrides) => void;
   applyToggleWindowShortcut: (keybindings?: KeybindingOverrides) => void;
   ensureWindow: () => Promise<boolean>;
@@ -146,7 +147,6 @@ export function registerApplicationStartup(deps: StartupDependencies): void {
       updater,
       modelsDevCatalog,
       plugins,
-      activeTurns,
       isSessionBusy,
       getHost,
       getMainWindow,
@@ -161,6 +161,8 @@ export function registerApplicationStartup(deps: StartupDependencies): void {
       planUiProbe,
       applyApplicationMenuSettings,
       applyDeveloperMode,
+      applyPreventScreenSleep,
+      applyKeepAwakeWhileRunning,
       applyPluginLauncherShortcut,
       applyToggleWindowShortcut,
       ensureWindow,
@@ -310,9 +312,13 @@ export function registerApplicationStartup(deps: StartupDependencies): void {
           theme?: unknown;
           keybindings?: unknown;
           developerMode?: unknown;
+          preventScreenSleep?: unknown;
+          keepAwakeWhileRunning?: unknown;
         } | null;
         applyApplicationMenuSettings(stored);
         applyDeveloperMode(stored);
+        applyPreventScreenSleep(stored);
+        applyKeepAwakeWhileRunning(stored);
         await applyNetworkProxyFromAppSettings(stored);
       } catch {
         // Keep the OS-locale menu until settings can be read again, while
@@ -351,7 +357,11 @@ export function registerApplicationStartup(deps: StartupDependencies): void {
     // GitHub discovery is delayed and time-bounded. Never start it before the
     // first window exists: a hung feed used to sit in "checking" for ~60s and
     // compete with boot for the net stack.
-    updater.startAutoCheck();
+    // Adopt legacy NSIS baselines before the delayed feed check can start. The
+    // filesystem work runs after the first window exists and never blocks boot.
+    void updater
+      .reclaimRelocatedUpdateCache()
+      .finally(() => updater.startAutoCheck());
     // createWindow awaits the initial load (loadFile resolves on
     // did-finish-load), so the page is up; give React a beat to mount its
     // event subscriptions before pushing the boot outcome.

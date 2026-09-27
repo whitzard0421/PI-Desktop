@@ -342,7 +342,7 @@ describe("seedDelegateMessages", () => {
       details: { query: "BrowserPreview", activated: [] },
     })).toMatchObject({
       role: "toolResult",
-      details: { addedToolNames: ["BrowserPreview"] },
+      details: { query: "BrowserPreview", addedToolNames: ["BrowserPreview"] },
     });
     expect(seed({
       content: [{ type: "text", text: "Activated PluginCheck." }],
@@ -361,12 +361,17 @@ describe("seedDelegateMessages", () => {
     expect(seed({
       content: [{ type: "text", text: "Activated Glob." }],
       addedToolNames: ["BrowserPreview"],
-      details: { addedToolNames: ["Glob"], activated: ["PluginCheck"] },
+      details: { query: "BrowserPreview", addedToolNames: ["Glob"], activated: ["PluginCheck"] },
     })).toMatchObject({
       role: "toolResult",
-      details: { addedToolNames: ["Glob"] },
+      details: {
+        query: "BrowserPreview",
+        activated: ["PluginCheck"],
+        addedToolNames: ["Glob"],
+      },
     });
   });
+
 
   it("skips a failed assistant row but still replays its tool pair", () => {
     const rows: UiMessage[] = [

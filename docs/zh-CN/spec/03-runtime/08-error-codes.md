@@ -97,8 +97,10 @@ stdio 与 Tokio 的动态阻塞池隔离，因此后一种情况
 | `AGENT_NOT_FOUND` | 不 | 会话丢失 |
 | `TURN_NOT_FOUND` | 不 | 使 id 无效 |
 | `TURN_ABORTED` | 不 | 回合被 user/system 中止 |
+| `AGENT_SIDECAR_CRASHED` | 不 | Node agent sidecar 进程在回合中途死亡；所属回合以中止收尾并使用此代码，而不是无关的 Plan 审批代码（issue #1077） |
+| `AGENT_SIDECAR_OOM` | 不 | sidecar 在 JavaScript 堆触及配置上限后死亡，依据其 stderr 尾部的 V8 致命错误横幅判定；在输入缩小之前，同一回合会以同样方式失败（issue #1077） |
 | `MODEL_NOT_CONFIGURED` | 不 | 未选择可用模型，或提供商因未知而拒绝所选模型 |
-| `PROVIDER_ERROR` | 是的 | 上游提供商故障；可重试的故障（5xx 网关）最多获得四次同回合重试，格式错误的 400/422 请求是终止的 |
+| `PROVIDER_ERROR` | 是的 | 上游提供商故障；可重试的故障（5xx 网关）最多获得四次同回合重试，而格式错误的 400/422 请求，以及适配器自身拒绝的请求选项（Google 适配器遇到自定义 `fetch`，issue #1072）都是终止的 |
 | `PROVIDER_UNAUTHORIZED` | 不 | bad/missing 提供商凭证 |
 | `PROVIDER_RATE_LIMITED` | 是的 | 供应商费率有限 |
 | `CONTEXT_TOO_LARGE` | 不 | 恢复后 prompt/context 仍超出安全模型预算、发生第二个提供程序溢出或禁用自动恢复 |
@@ -354,7 +356,9 @@ Exhaustion reports `retryAttempt: 10` from the relevant budget counter.
 里的 errno 已经消失，裸 `fetch failed` 只能被记为 `networkCategory: unknown`；
 而 fetch 包装层仍持有原始 Error，并从它给出同一组经过校验的字段。捕获到的
 cause 同时确定了阶段：没有任何响应到达时故障记为 `phase: request`，这正是它
-与「响应中途断流」的区别。`networkRoute`（`direct`、`environment-proxy`、
+与「响应中途断流」的区别。发往 pi-ai Google 适配器的请求不带 fetch 包装、也不会到达 `onResponse`（issue #1072），因此这两个字段都不会上报：它只保留提供商自己的消息，`Retry-After` 退回有界阶梯，下面的重建对它不生效。
+
+`networkRoute`（`direct`、`environment-proxy`、
 `http-proxy`、`socks5-proxy`）指出请求实际走的链路，代理这一跳失败无需再从
 errno 猜测。
 

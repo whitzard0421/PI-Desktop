@@ -7,7 +7,7 @@
  * is not configured, so these helpers keep the two notions apart: what a
  * provider itself offers, and what is safe to display for it.
  */
-import { isImageGenerationModel, modelIdsMatch, type ImageGenerationBindings, type ProviderPublic } from "@pi-desktop/shared";
+import { isImageGenerationModel, modelWireIdsEqual as sameComposerModelId, type ImageGenerationBindings, type ProviderPublic } from "@pi-desktop/shared";
 
 export type DefaultModelOption = {
   provider: ProviderPublic;
@@ -46,12 +46,12 @@ export function providerOffersModel(
 ): boolean {
   if (!modelId) return false;
   const bindings = provider.models ?? [];
-  if (bindings.some((binding) => modelIdsMatch(binding.id, modelId))) return true;
+  if (bindings.some((binding) => sameComposerModelId(binding.id, modelId))) return true;
   // A legacy/OAuth row may carry only `defaultModelId` with no bindings yet.
   return (
     bindings.length === 0 &&
     !!provider.defaultModelId &&
-    modelIdsMatch(provider.defaultModelId, modelId)
+    sameComposerModelId(provider.defaultModelId, modelId)
   );
 }
 
@@ -124,4 +124,30 @@ export function keepsAppDefaultModel(
   const provider = providers.find((candidate) => candidate.id === defaultProviderId);
   if (!provider || !providerServesChatModels(provider, imageGeneration)) return false;
   return hasResolvedDefaultModel(providers, defaultProviderId, defaultModelId);
+}
+
+/**
+ * The app default a finished vendor login claims, or null to leave it alone.
+ *
+ * Signing in follows the rule adding an API service follows: the new account's
+ * head chat model becomes the app default only while the current default does
+ * not resolve to a runnable provider, so a first-time subscriber can chat right
+ * away and a second login never moves what the user already runs.
+ */
+export function loginDefaultModel(
+  providers: readonly ProviderPublic[],
+  providerId: string,
+  defaults: { defaultProviderId?: string; defaultModelId?: string },
+  imageGeneration?: ImageGenerationBindings | null,
+): { providerId: string; modelId: string } | null {
+  if (keepsAppDefaultModel(
+    providers,
+    defaults.defaultProviderId,
+    defaults.defaultModelId,
+    imageGeneration,
+  )) return null;
+  const account = providers.find((candidate) => candidate.id === providerId);
+  if (!account || !providerServesChatModels(account, imageGeneration)) return null;
+  const modelId = defaultModelOptions([account], imageGeneration)[0]?.modelId;
+  return modelId ? { providerId: account.id, modelId } : null;
 }

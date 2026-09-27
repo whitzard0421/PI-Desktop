@@ -40,6 +40,8 @@ import {
 } from "./icons";
 import { TooltipButton } from "./ui";
 import { ContextMenu, useContextMenu } from "./ContextMenu";
+import { MarkdownTable } from "./MarkdownTable";
+import { markdownTableData } from "../lib/markdown-table";
 import { api } from "../lib/api";
 import { openHttpUrl } from "../lib/open-http-url";
 import {
@@ -54,7 +56,12 @@ import {
 import { useAppStore } from "../stores/app-store";
 import { useReferencedImageDataUrl } from "../lib/use-referenced-image-data-url";
 import { absoluteImagePath, remarkLocalImagePaths } from "../lib/markdown-image-paths";
+import { remarkNormalizeWrappedMarkdownLinkDestinations } from "../lib/markdown-link-destinations";
 import { useOpenChatFileRef } from "../hooks/use-preview-target";
+import {
+  useChatFileMenuItems,
+  type ChatFileMenuTarget,
+} from "../hooks/use-chat-file-menu";
 import {
   remarkChatFileLinks,
   resolvePreviewTarget,
@@ -400,9 +407,26 @@ function MermaidBlock({ code, ...position }: { code: string } & SourcePositionPr
 const MarkdownBlockContext = createContext({
   closedFence: false,
   renderDiagrams: true,
+  originalRaw: "",
 });
 
 const MarkdownBaseDirContext = createContext("");
+
+/**
+ * File references inside one rendered markdown tree share a single menu.
+ *
+ * A chip, a link and a local image all name files the same way and offer the
+ * same items (`useChatFileMenuItems`), so the tree owns one surface instead of
+ * one per reference. The default is `null` for a tree rendered outside
+ * `Markdown`; a reference there keeps the platform's own menu rather than
+ * offering an action that could not run.
+ */
+const MarkdownFileMenuContext = createContext<OpenMarkdownFileMenu | null>(null);
+
+type OpenMarkdownFileMenu = (
+  event: React.MouseEvent<HTMLElement>,
+  target: ChatFileMenuTarget,
+) => void;
 
 function extractCode(children: ReactNode): { code: string; lang: string } | null {
   const element = Array.isArray(children)
@@ -461,6 +485,7 @@ function InlineCode({
   const root = useAppStore((s) => s.workspace?.path);
   const baseDir = useContext(MarkdownBaseDirContext);
   const openFileRef = useOpenChatFileRef();
+  const openFileMenu = useContext(MarkdownFileMenuContext);
   const text = typeof children === "string" ? children : null;
   const target =
     text && !className && !text.includes("\n")
@@ -485,6 +510,12 @@ function InlineCode({
           ? openFileRef(text ?? target.path, baseDir)
           : openHttpUrl(target.url)
       }
+      onContextMenu={
+        target.kind === "file" && openFileMenu
+          ? (event) =>
+              openFileMenu(event, { path: text ?? target.path, baseDir })
+          : undefined
+      }
     >
       <code className={className} {...rest}>
         {children}
@@ -503,6 +534,7 @@ function Anchor({
   const root = useAppStore((s) => s.workspace?.path);
   const baseDir = useContext(MarkdownBaseDirContext);
   const openFileRef = useOpenChatFileRef();
+  const openFileMenu = useContext(MarkdownFileMenuContext);
   const openUrl = useAppStore((s) => s.openUrlInWorkPanel);
   const showToast = useAppStore((s) => s.showToast);
 
@@ -531,10 +563,22 @@ function Anchor({
     destinations the app can send it to stay one press away. The surface is the
     shared pointer-anchored menu, which measures before it reveals, clamps inside
     the viewport, and owns dismissal and arrow-key navigation; only the items are
-    link-specific.
+    link-specific. A file link has one destination of its own, and that item is
+    the one the tree's menu already carries.
   */
   const onContextMenu = (event: React.MouseEvent<HTMLAnchorElement>) => {
-    if (!href || !/^https?:\/\//i.test(href)) return;
+    if (!href) return;
+    if (!/^https?:\/\//i.test(href)) {
+      /*
+        A file link names the same reference a chip does, so it offers the same
+        action on the file's folder. `./` and `../` resolve against the markdown
+        file on screen, which is the base this row already holds.
+      */
+      const rel = toWorkspaceRel(safeDecodeUri(href), root, baseDir);
+      if (!rel || !openFileMenu) return;
+      openFileMenu(event, { path: rel, baseDir });
+      return;
+    }
     const target = href;
     openContextMenu(event, {
       items: [
@@ -616,6 +660,7 @@ function MarkdownImage({
   const root = useAppStore((s) => s.workspace?.path);
   const baseDir = useContext(MarkdownBaseDirContext);
   const openFileRef = useOpenChatFileRef();
+  const openFileMenu = useContext(MarkdownFileMenuContext);
   const fileTitle = usePreviewTitle("file");
   const urlTitle = usePreviewTitle("url");
   const source = typeof src === "string" ? src : "";
@@ -630,6 +675,16 @@ function MarkdownImage({
   // Always run the hook before any branch so hook order stays stable when a
   // streaming src flips between remote and local. Remote images pass null.
   const dataUrl = useReferencedImageDataUrl(isRemote ? null : localRef);
+
+  /*
+    A file the renderer can already show is still a file whose folder the user
+    may want, so a local image carries the same menu its chip fallback does.
+  */
+  const onLocalContextMenu =
+    localRef && openFileMenu
+      ? (event: React.MouseEvent<HTMLElement>) =>
+          openFileMenu(event, { path: localRef, baseDir })
+      : undefined;
   if (isRemote) {
     return (
       <img
@@ -651,6 +706,7 @@ function MarkdownImage({
         className="chat-image-local"
         title={rel ? fileTitle : source}
         onClick={localRef ? () => openFileRef(localRef, baseDir) : undefined}
+        onContextMenu={onLocalContextMenu}
       />
     );
   }
@@ -662,6 +718,7 @@ function MarkdownImage({
         {...sourcePositionProps(rest)}
         title={fileTitle}
         onClick={() => openFileRef(localRef, baseDir)}
+        onContextMenu={onLocalContextMenu}
       >
         <IconImage size={14} aria-hidden />
         <span>{alt || localRef.split("/").pop()}</span>
@@ -672,15 +729,21 @@ function MarkdownImage({
 }
 
 function Table({
-  node: _node,
+  node,
   children,
   ...rest
-}: ComponentProps<"table"> & { node?: unknown }) {
-  return (
+}: ComponentProps<"table"> & { node?: Parameters<typeof markdownTableData>[0] }) {
+  const { originalRaw } = useContext(MarkdownBlockContext);
+  const data = useMemo(
+    () => node ? markdownTableData(node, originalRaw) : null,
+    [node, originalRaw],
+  );
+  const table = (
     <div className="table-wrap">
       <table {...rest}>{children}</table>
     </div>
   );
+  return data ? <MarkdownTable {...data}>{table}</MarkdownTable> : table;
 }
 
 /** Inline audio player for audio URLs in markdown. */
@@ -724,7 +787,11 @@ const markdownComponents: Components = {
 // The grammar the block splitter parses with, plus the renderer-only rewrite
 // of local image paths. `remarkLocalImagePaths` transforms URLs and moves no
 // block boundary, so the splitter has no reason to run it.
-const staticRemarkPlugins = [...markdownRemarkPlugins, remarkLocalImagePaths];
+const staticRemarkPlugins = [
+  ...markdownRemarkPlugins,
+  remarkNormalizeWrappedMarkdownLinkDestinations,
+  remarkLocalImagePaths,
+];
 
 // Extend the default schema only for the media elements rendered above, plus
 // `remark-math`'s math classes on `<code>`: the default `language-*` allow list
@@ -783,8 +850,9 @@ const Block = memo(function MarkdownBlock({
     () => ({
       closedFence: isClosedFencedCodeBlock(raw),
       renderDiagrams,
+      originalRaw,
     }),
-    [raw, renderDiagrams],
+    [raw, originalRaw, renderDiagrams],
   );
   const remarkPlugins = useMemo(
     () => [
@@ -825,6 +893,23 @@ export const Markdown = memo(function Markdown({
   baseDir?: string;
 }) {
   const workspaceRoot = useAppStore((s) => s.workspace?.path);
+
+  /*
+    One menu for every file reference in this tree. Its blocks are memoized and
+    rendered through the same component map, so the surface is asked for by the
+    reference the pointer chose and owned here, where it outlives a block that
+    streaming may replace.
+  */
+  const fileMenuItems = useChatFileMenuItems();
+  const {
+    contextMenu: fileMenu,
+    openContextMenu: openFileMenu,
+    closeContextMenu: closeFileMenu,
+  } = useContextMenu();
+  const openMarkdownFileMenu = useCallback<OpenMarkdownFileMenu>(
+    (event, target) => openFileMenu(event, { items: fileMenuItems(target) }),
+    [fileMenuItems, openFileMenu],
+  );
   // Keep normalization length-preserving so source anchors and the bracket
   // display plugin still address the original text. Block splitting uses the
   // same math grammar as rendering, including unclosed streaming math blocks.
@@ -835,23 +920,26 @@ export const Markdown = memo(function Markdown({
   const blocks = useBlocks(normalizedSource);
   let sourceOffset = 0;
   return (
-    <MarkdownBaseDirContext.Provider value={baseDir ?? ""}>
-      {blocks.map((raw, i) => {
-        const start = sourceOffset;
-        sourceOffset = start + raw.length;
-        const originalRaw = source.slice(start, start + raw.length);
-        return (
-          <Block
-            key={i}
-            raw={raw}
-            originalRaw={originalRaw}
-            sourceOffset={start}
-            renderDiagrams={renderDiagrams}
-            workspaceRoot={workspaceRoot}
-            baseDir={baseDir}
-          />
-        );
-      })}
-    </MarkdownBaseDirContext.Provider>
+    <MarkdownFileMenuContext.Provider value={openMarkdownFileMenu}>
+      <MarkdownBaseDirContext.Provider value={baseDir ?? ""}>
+        {blocks.map((raw, i) => {
+          const start = sourceOffset;
+          sourceOffset = start + raw.length;
+          const originalRaw = source.slice(start, start + raw.length);
+          return (
+            <Block
+              key={i}
+              raw={raw}
+              originalRaw={originalRaw}
+              sourceOffset={start}
+              renderDiagrams={renderDiagrams}
+              workspaceRoot={workspaceRoot}
+              baseDir={baseDir}
+            />
+          );
+        })}
+      </MarkdownBaseDirContext.Provider>
+      <ContextMenu state={fileMenu} onClose={closeFileMenu} />
+    </MarkdownFileMenuContext.Provider>
   );
 });

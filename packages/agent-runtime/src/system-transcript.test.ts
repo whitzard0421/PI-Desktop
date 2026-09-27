@@ -17,10 +17,12 @@ import {
   initialSystemTranscript,
   projectDynamicSystemMessages,
   rebuildSystemTranscript,
+  removeTransientSystemMessage,
   replaceSystemPrompt,
   syncSystemTools,
   systemPromptContent,
 } from "./system-transcript.js";
+
 
 
 const read: Tool = { name: "Read", description: "Read text", parameters: Type.Object({ path: Type.String() }) };
@@ -275,5 +277,58 @@ describe("system transcript helpers", () => {
     expect(requests[0]?.filter((message) => message.role === "system")).toEqual(systems);
     expect(getCurrentTools(requests[0]!)).toEqual([toToolDeclaration(tool)]);
     expect(agent.state.messages.filter((message) => message.role === "system")).toEqual(systems);
+  });
+
+  it("keeps dynamic rows after completed tool pairs when a deferred tool then activates", () => {
+    const preview: Tool = { name: "BrowserPreview", description: "Preview HTML", parameters: Type.Object({}) };
+    const call: AssistantMessage = {
+      ...assistant,
+      stopReason: "toolUse",
+      content: [{ type: "toolCall", id: "search-1", name: "ToolSearch", arguments: {} }],
+    };
+    const result: AgentMessage = {
+      role: "toolResult",
+      toolCallId: "search-1",
+      toolName: "ToolSearch",
+      content: [{ type: "text", text: "Activated BrowserPreview." }],
+      isError: false,
+      timestamp: 2_500,
+    };
+    const withDynamic = appendSystemMessage([initial, call, result], "Reusable session A");
+    const dynamic = withDynamic.at(-1);
+    const activated = syncSystemTools(withDynamic, [read, edit, preview]);
+    expect(activated[0]).toBe(initial);
+    expect(activated[1]).toMatchObject({ role: "system", toolsAdded: [preview] });
+    expect(activated.slice(2)).toEqual([call, result, dynamic]);
+    expect(getCurrentTools(activated)).toEqual([read, edit, preview]);
+    expect(getCurrentSystemMessage(activated)?.sections).toMatchObject({ rules: "Keep these rules" });
+
+    expect(estimateContextTokens(activated).usageTokens).toBe(0);
+
+    const projected = projectDynamicSystemMessages(activated);
+    const contextIndex = projected.findIndex(
+      (message) => message.role === "user" && String(message.content).includes("<runtime-context>"),
+    );
+    expect(projected.indexOf(call)).toBeLessThan(projected.indexOf(result));
+    expect(projected.indexOf(result)).toBeLessThan(contextIndex);
+    expect(projected[contextIndex]).toMatchObject({
+      role: "user",
+      content: "<runtime-context>\nReusable session A\n</runtime-context>",
+    });
+  });
+
+  it("invalidates usage when a recovery nudge is successfully removed", () => {
+    vi.spyOn(Date, "now").mockReturnValue(5_000);
+    const nudged = appendSystemMessage([initial, assistant], "One-shot recovery nudge", "transient");
+    const response = { ...assistant, timestamp: 6_000, content: [{ type: "text" as const, text: "Recovered" }] };
+    const during = [...nudged, response];
+    expect(removeTransientSystemMessage(during, undefined)).toBe(during);
+    expect(removeTransientSystemMessage(during, user)).toBe(during);
+    const cleaned = removeTransientSystemMessage(during, nudged.at(-1));
+    expect(cleaned).not.toContain(nudged.at(-1));
+    expect(cleaned[0]?.timestamp).toBeGreaterThan(response.timestamp);
+    expect(estimateContextTokens(cleaned).usageTokens).toBe(0);
+    expect(getCurrentTools(cleaned)).toEqual([read, edit]);
+    expect(systemPromptContent(cleaned)).toBe("Base instructions");
   });
 });

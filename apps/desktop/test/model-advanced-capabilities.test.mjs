@@ -52,13 +52,9 @@ test("the capability checkboxes show and follow the published value", () => {
   assert.match(pickerSource, /settings\.documentInput/);
   assert.match(pickerSource, /supportsImages: next/);
   assert.match(pickerSource, /supportsDocuments: next/);
-  // Agreeing with models.dev stores "follow the catalog" instead of an
-  // equal-valued override, so a later catalog correction still lands and no
-  // separate reset control is needed.
-  assert.match(
-    pickerSource,
-    /onChange\(event\.target\.checked === published \? null : event\.target\.checked\)/,
-  );
+  // A deliberate checkbox change pins the selected value even when it equals
+  // today's catalog value; later catalog corrections must not undo that choice.
+  assert.match(pickerSource, /onChange\(event\.target\.checked\)/);
   assert.match(
     pickerSource,
     /const effective = typeof value === "boolean" \? value : published/,
@@ -88,7 +84,7 @@ test("image generation selection hides the summary when nothing can be chosen", 
     pickerSource,
     /className="provider-chosen-advanced-toggle"[^\n]*settings\.setImageModel/,
   );
-  assert.match(pickerSource, /imageModelIds\?\.some\([\s\S]*?modelIdsMatch/);
+  assert.match(pickerSource, /imageModelIds\?\.some\([\s\S]*?modelId\.toLowerCase\(\) === binding\.id\.toLowerCase\(\)/);
   assert.match(pickerSource, /onImageModelChange\(binding\.id, event\.target\.checked\)/);
   assert.match(imageModelRowSource, /imageGenerationBindings\(settings\.imageGenerationModels, null\)/);
   assert.match(imageModelRowSource, /if \(!options\.some\(\(option\) => !option\.disabled\)\) return null;/);
@@ -200,9 +196,10 @@ test("every image gate reads the override-shaped model config", () => {
 });
 
 test("a model the catalog does not describe still reports its binding overrides", () => {
-  // Both enrichment helpers fall back to the generic shape and then apply the
-  // binding, matching the launch path; returning undefined instead would report
-  // no image support for a hand-typed id whose transport does inline images.
+  // Both enrichment helpers use the same catalog-or-generic resolver and then
+  // apply the binding, matching the launch path; returning undefined instead
+  // would report no image support for a hand-typed id whose transport does
+  // inline images.
   const providerBlock = providerCatalogSource.slice(
     providerCatalogSource.indexOf("const enrichProvider ="),
     providerCatalogSource.indexOf("const normalizeThinkingLevel ="),
@@ -216,7 +213,7 @@ test("a model the catalog does not describe still reports its binding overrides"
   );
   for (const block of [providerBlock, sessionBlock]) {
     assert.match(block, /modelConfigWithBinding\(/);
-    assert.match(block, /genericModelConfig\(modelId, provider\.baseUrl \?\? ""\)/);
+    assert.match(block, /catalogModelConfigFor\(modelsDevCatalog/);
     assert.match(block, /bindingForModel\(provider, modelId\)/);
   }
   assert.doesNotMatch(
@@ -236,7 +233,9 @@ test("the advanced body is a compact sheet without helper paragraphs", () => {
   );
   assert.doesNotMatch(pickerSource, /hint=\{t\("settings\.modelAliasHint"\)\}/);
   assert.match(pickerSource, /aria-controls=\{advancedId\}/);
-  assert.match(pickerSource, /models\[0\]\?\.id \?\? null/);
+  // Every row starts folded so chosen models stay scannable (D625).
+  assert.match(pickerSource, /useState<string \| null>\(null\)/);
+  assert.doesNotMatch(pickerSource, /models\[0\]\?\.id \?\? null/);
   assert.match(
     pickerSource,
     /className="provider-chosen-thinking-head">[\s\S]*?provider-chosen-thinking-default[\s\S]*?provider-chosen-thinking-chips/,

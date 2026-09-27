@@ -7,7 +7,7 @@ import {
   isActiveInProject,
   isCommandShellCatalog,
   normalizeMode,
-  resolveBindingContextWindow,
+  resolveBindingLimits,
   trustedExtensionAgentKeyFromProviderId,
   type CommandShellCatalog,
   type ModelBinding,
@@ -189,12 +189,12 @@ export function createHeadlessLaunchResolver(options: HeadlessLaunchResolverOpti
   }
 
   function bindingForModel(provider: Pick<HostProviderRecord, "models">, modelId: string): ModelBinding | undefined {
-    return provider.models?.find((binding) => binding.id === modelId);
+    return provider.models?.find((binding) => binding.id.trim().toLowerCase() === modelId.trim().toLowerCase());
   }
 
   function effectiveModelConfig(provider: HostProviderRecord, modelId: string, baseUrl: string | undefined) {
     const storedModel = bindingForModel(provider, modelId);
-    const resolvedLimits = resolveBindingContextWindow(catalogModelConfig(provider, modelId, baseUrl), storedModel);
+    const resolvedLimits = resolveBindingLimits(catalogModelConfig(provider, modelId, baseUrl), storedModel);
     const modelConfig = modelConfigWithBinding(resolvedLimits.catalogConfig, resolvedLimits.binding);
     return { modelConfig, capabilities: capabilitiesFromModelConfig(modelConfig), storedModel };
   }

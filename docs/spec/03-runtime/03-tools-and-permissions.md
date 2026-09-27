@@ -78,6 +78,7 @@ tool is loaded. `ToolSearch` itself never executes a workspace operation and
 never bypasses host-core policy.
 
 
+
 ## 3. Common Tool Constraints
 
 Every non-interactive execution tool must have:

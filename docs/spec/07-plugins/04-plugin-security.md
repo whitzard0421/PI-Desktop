@@ -98,17 +98,19 @@ before it is ever sent to the UI:
   points at the source, and each `url(...)` argument is kept verbatim and judged
   by its target. A sheet that merely *mentions* a banned token in a comment or a
   string is therefore accepted
-- Rejected: `@import`, any `url()` target that is not a `data:` URI, a `url(`
-  the parser cannot resolve, `javascript:`, `expression(`, and markup sequences
-  (`<style`, `</style`, `<!--`); an empty sheet is refused too
+- Rejected: `@import`, any `url()` target that is neither a `data:` URI nor a
+  declared theme asset, a `url(` the parser cannot resolve, `javascript:`,
+  `expression(`, and markup sequences (`<style`, `</style`, `<!--`); an empty
+  sheet is refused too
 - Capped at 256KB per file, 8 themes per plugin
-- A theme may declare `assets` (absolute paths, whitelisted image and font
-  extensions, 4MB summed). Each matching `url()` is rewritten to
-  `plugin-asset://<pluginId>/<path>` and served by a host handler that resolves
-  only through the loaded plugin's own registered list: read-only, `nosniff`,
-  and revoked when the plugin unloads. `pi.themes.upsert` registers the same
-  kind of path at runtime. An unregistered reference is still refused, and the
-  raw path never reaches the renderer
+- A theme may declare `assets` using whitelisted image/font extensions: either
+  package-relative paths (resolved inside the plugin root; traversal and `node_modules`
+  references are rejected) or absolute paths. The total is capped at 4MB.
+  Each matching `url()` is rewritten to `plugin-asset://<pluginId>/<path>`
+  and served read-only through the loaded plugin's registered list with `nosniff`;
+  the registration is revoked when the plugin unloads. `pi.themes.upsert` may
+  register the same kind of path at runtime. An unregistered reference is refused,
+  and the raw path never reaches the renderer
 - `contributes.windowAppearance` (`#rrggbb` / `#rrggbbaa`) requires
   `ui.window.appearance` and applies only while one of that plugin's themes is
   the selected one; leaving the theme restores the host background, because the
@@ -348,12 +350,12 @@ manifest did not name:
 - `transport: "stdio"` spawns a local executable (`mcp.server.local`). The
   `command` must be a bare PATH name or a plugin-relative path; absolute paths
   are refused at validation time. The child gets a minimal environment — the
-  declared `env` entries plus one shared allowlist (`child-process-env.ts`):
-  `PATH`, `SystemRoot`, `windir`, `TEMP`, `TMP`, `TMPDIR`, `LANG`, `HOME`,
-  `USER`, `USERPROFILE`. The identity variables are there because the child is
-  third-party code that resolves `~` through `$HOME` rather than calling
-  `os.homedir()` (issue #717); provider keys and other host state still never
-  cross.
+  declared `env` entries plus the shared allowlist (`child-process-env.ts`)
+  and the extra profile/toolchain keys `npx`/`uvx` need (`PATHEXT`, `ComSpec`,
+  `FNM_DIR`, …). Unix PATH is the login-shell PATH (D600). Bare `npx`/`uvx`
+  resolve to real binaries; official Windows Node uses `node.exe` +
+  `npx-cli.js`, and remaining `.cmd` shims start through `cmd.exe` with quoted
+  literal args (D624). Provider keys and other host state still never cross.
 - `transport: "http"` reaches a remote endpoint (`mcp.server.remote`). The `url`
   may use `http` or `https`; non-loopback HTTP is unencrypted and should only be
   used on a trusted network. Plugin endpoints must also be covered by
@@ -364,13 +366,18 @@ manifest did not name:
   literal secret in the manifest is a review smell, not a supported pattern
   (D018).
 - Connection budget: 10s to complete `initialize`, 100s per `tools/call`, 4MB
-  per stdio line. `tools/list` is followed to its last page under the per-server
+  per stdio line. Remote HTTP requests use the budget of the operation they
+  carry, so a successful handshake does not impose its 10s limit on a later
+  tool call. `tools/list` is followed to its last page under the per-server
   guards of §8.1 — 2048 tools, 100 pages, a cursor that repeats or is malformed,
   and 30s for the whole traversal — and a server that breaks one is refused
   rather than contributing a prefix of its catalog, because MCP tools reach the
   deferred on-demand entries behind `ToolSearch`, not as an always-present list.
   Servers are connected lazily and torn down when the plugin unloads or is
   disabled.
+  Stopping the calling session cancels that session's in-flight MCP request and
+  sends `notifications/cancelled` to the server. A shared server connection and
+  calls owned by other sessions remain active.
 
 ## 8.2 Desktop control and device access
 

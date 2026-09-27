@@ -201,9 +201,11 @@ export function syncSystemTools(messages: AgentMessage[], tools: readonly Tool[]
   // A real tool change becomes a newer prefix, so old usage is invalidated.
   // Keep add/remove/same-name-replace deltas and keep the declared set aligned
   // with the executable catalog so the agent loop does not append the same
-  // change again on the next turn.
+  // change again on the next turn. Durable system rows stay in front for
+  // upstream section/tool replay; runtime-owned dynamic rows keep their place
+  // relative to preceding complete tool call/result pairs.
   return [
-    ...systemMessages(messages),
+    ...baseSystemMessages(messages),
     {
       role: "system",
       content: "",
@@ -211,6 +213,26 @@ export function syncSystemTools(messages: AgentMessage[], tools: readonly Tool[]
       ...(changes.toolsRemoved.length ? { toolsRemoved: changes.toolsRemoved } : {}),
       timestamp: nextSystemTimestamp(messages),
     },
-    ...messages.filter((message) => message.role !== "system"),
+    ...messages.filter((message) => message.role !== "system" || dynamicSystemKinds.has(message)),
+  ];
+}
+
+/**
+ * Drop a one-shot recovery nudge. Successful deletion advances durable system
+ * semantic time the way origin/main `replaceSystemPrompt` restore does, so the
+ * recovery response cannot keep a usage anchor billed against the nudged prefix.
+ */
+export function removeTransientSystemMessage(
+  messages: AgentMessage[],
+  row: AgentMessage | undefined,
+): AgentMessage[] {
+  if (!row) return messages;
+  const next = messages.filter((message) => message !== row);
+  if (next.length === messages.length) return messages;
+  const current = currentSystemMessage(baseSystemMessages(next));
+  if (!current) return next;
+  return [
+    { ...current, timestamp: nextSystemTimestamp(next) },
+    ...next.filter((message) => message.role !== "system" || dynamicSystemKinds.has(message)),
   ];
 }

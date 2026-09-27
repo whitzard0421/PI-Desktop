@@ -1,8 +1,13 @@
-import type { RefObject } from "react";
+import { formatTokenCount, type ModelInfo, type ProviderPublic } from "@pi-desktop/shared";
 import type { TFunction } from "i18next";
-import { formatTokenCount, modelIdsMatch, type ModelInfo, type ProviderPublic } from "@pi-desktop/shared";
-import { IconCheck, IconSearch } from "../../../components/icons";
-import { composerModelBadges } from "../../../lib/composer-models";
+import type { RefObject } from "react";
+import { IconCheck, IconEye, IconSearch, IconSparkles } from "../../../components/icons";
+import {
+  composerModelBadges,
+  composerModelBinding,
+  composerModelDisplayName,
+  sameComposerModelId,
+} from "../../../lib/composer-models";
 
 export type ComposerModelGroup = {
   provider: ProviderPublic;
@@ -59,8 +64,17 @@ export function ComposerModelList({
                         const index = flatIndex++;
                         const active =
                           selectedProviderId === group.provider.id &&
-                          modelIdsMatch(selectedModelId ?? "", model.modelId);
-                        const optionTitle = model.displayName || model.modelId;
+                          sameComposerModelId(selectedModelId ?? "", model.modelId);
+                        const optionTitle = model.modelId;
+                        const alias = composerModelBinding(
+                          group.provider,
+                          model.modelId,
+                        )?.alias?.trim();
+                        const optionDisplayName = composerModelDisplayName(
+                          group.provider,
+                          model.modelId,
+                          model.displayName,
+                        );
                         return (
                           <button
                             key={`${group.provider.id}:${model.modelId}`}
@@ -74,17 +88,41 @@ export function ComposerModelList({
                             onClick={() => void selectModel(group.provider, model.modelId)}
                           >
                             <span className="composer-model-option-main">
-                              <span className="truncate">{optionTitle}</span>
+                              {/*
+                                One label per row, never both: the name the user
+                                set wins over the catalog's, and an alias carries
+                                its own tone so which one is on screen stays
+                                visible. The wire id remains the row's title, so
+                                identity is still one hover away.
+                              */}
+                              <span
+                                className={`composer-model-label ${alias ? "is-alias" : ""}`}
+                              >
+                                {alias || optionDisplayName}
+                              </span>
                               <span className="composer-model-option-meta">
-                                {composerModelBadges(model, group.provider).map((badge) => (
-                                  <span
-                                    key={badge}
-                                    className="composer-model-option-badge"
-                                    title={t(badge === "reasoning" ? "chat.modelBadgeReasoning" : "chat.modelBadgeVision")}
-                                  >
-                                    {t(badge === "reasoning" ? "chat.modelBadgeReasoning" : "chat.modelBadgeVision")}
-                                  </span>
-                                ))}
+                                {composerModelBadges(model, group.provider).map((badge) => {
+                                  const badgeLabel = t(
+                                    badge === "reasoning"
+                                      ? "chat.modelBadgeReasoning"
+                                      : "chat.modelBadgeVision",
+                                  );
+                                  return (
+                                    <span
+                                      key={badge}
+                                      className="composer-model-option-badge"
+                                      title={badgeLabel}
+                                      aria-label={badgeLabel}
+                                      role="img"
+                                    >
+                                      {badge === "reasoning" ? (
+                                        <IconSparkles size={12} aria-hidden="true" />
+                                      ) : (
+                                        <IconEye size={12} aria-hidden="true" />
+                                      )}
+                                    </span>
+                                  );
+                                })}
                                 {model.contextWindow ? (
                                   <span className="composer-model-option-ctx">
                                     {formatTokenCount(model.contextWindow)}

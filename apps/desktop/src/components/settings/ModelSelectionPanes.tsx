@@ -8,15 +8,15 @@
  * guarantee lives here once instead of in a convention two files had to
  * remember.
  */
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, type Ref } from "react";
 import { useTranslation } from "react-i18next";
 import {
   THINKING_LEVELS,
   bindingDefaultThinkingMenuLevels,
   bindingForCustomModel,
+  bindingForCustomModelInfo,
   bindingFromModelInfo,
   formatTokenCount,
-  modelIdsMatch,
   modelMatchesFilter,
   nativeWebSearchSupportedOn,
   publishedThinkingLevels,
@@ -43,7 +43,7 @@ import {
   customModelSeedBinding,
   type CustomModelLookupContext,
 } from "./model-custom-lookup";
-import { describeModelsFetchError } from "./model-fetch-error";
+import { ModelsFetchErrorMessage } from "./ModelsFetchErrorMessage";
 import type { ProviderModelsState } from "./useProviderModels";
 import { useModelReorder } from "./useModelReorder";
 
@@ -180,7 +180,7 @@ export function applyVisibleModelSelection(
   for (const row of visibleRows) {
     if (selected.has(row.id.toLowerCase())) continue;
     additions.push(
-      row.info ? bindingFromModelInfo(row.info) : bindingForCustomModel(row.id),
+      row.info ? { ...bindingFromModelInfo(row.info), id: row.id } : bindingForCustomModel(row.id),
     );
   }
   return additions.length === 0 ? current : [...current, ...additions];
@@ -209,6 +209,10 @@ export type ModelSelectionPanesProps = {
    * limits; absent fields only widen the catalog search.
    */
   lookupContext?: CustomModelLookupContext;
+  /** Attached to the hand-typed id field, so a caller can focus it. */
+  customModelInputRef?: Ref<HTMLInputElement>;
+  /** The chosen list is exactly what the recommendation picked. */
+  autoPicked?: boolean;
 };
 
 /**
@@ -226,6 +230,8 @@ export function ModelSelectionPanes({
   imageModelIds,
   lookupContext,
   onImageModelChange,
+  customModelInputRef,
+  autoPicked = false,
 }: ModelSelectionPanesProps) {
   const { t } = useTranslation();
   const { rows, models, publishedLevelsById, setModels } = selection;
@@ -233,9 +239,8 @@ export function ModelSelectionPanes({
   const [chosenQuery, setChosenQuery] = useState("");
   const [customModelId, setCustomModelId] = useState("");
   const [customModelError, setCustomModelError] = useState("");
-  const [expandedModelId, setExpandedModelId] = useState<string | null>(
-    () => models[0]?.id ?? null,
-  );
+  // Keep selections scannable; advanced settings stay folded until requested.
+  const [expandedModelId, setExpandedModelId] = useState<string | null>(null);
 
   // The returned list is short and already local, so filtering is client-side:
   // no host search and no debounced IPC round trip.
@@ -276,10 +281,9 @@ export function ModelSelectionPanes({
     if (models.length === 0) setChosenQuery("");
   }, [models.length]);
 
-  // The hosted web search tool only exists on two wires; on any other
-  // style the opt-in cannot work, so the checkbox stays present but disabled
-  // with an explanatory hint instead of silently doing nothing.
-  const nativeWebSearchWireCapable = nativeWebSearchSupportedOn(apiStyle);
+  // Use the same published endpoint routing as the runtime. A disabled control
+  // means this connection is not integrated, not that the vendor cannot search.
+  const nativeWebSearchWireCapable = nativeWebSearchSupportedOn(apiStyle, lookupContext?.baseUrl);
 
   /**
    * The chosen list narrows with the discovered list's rule plus the binding's
@@ -294,9 +298,9 @@ export function ModelSelectionPanes({
   );
   const reorder = useModelReorder(visibleChosen, setModels, busy);
 
-  /** A discovered row arrives enriched; a hand-typed id gets generic limits. */
+  /** Keep the wire id of the selected row, even if catalog spelling differs. */
   const bindingForRow = (row: ModelRow): ModelBinding =>
-    row.info ? bindingFromModelInfo(row.info) : bindingForCustomModel(row.id);
+    row.info ? bindingForCustomModelInfo(row.id, row.info) : bindingForCustomModel(row.id);
 
   /**
    * The rule for a model that is being added: a filter is kept while it still
@@ -313,7 +317,6 @@ export function ModelSelectionPanes({
       (binding) => binding.id.toLowerCase() === wanted,
     );
     if (!alreadyChosen) {
-      setExpandedModelId((open) => open ?? row.id);
       keepAddedModelVisible([bindingForRow(row)]);
     }
     setModels((current) => {
@@ -326,7 +329,6 @@ export function ModelSelectionPanes({
 
   const toggleVisibleModels = (select: boolean) => {
     if (select) {
-      setExpandedModelId((open) => open ?? visibleRows[0]?.id ?? null);
       const added = visibleRows
         .filter((row) => !selected.has(row.id.toLowerCase()))
         .map((row) => bindingForRow(row));
@@ -358,6 +360,14 @@ export function ModelSelectionPanes({
     } catch {
       return;
     }
+    /*
+      The host answered for the id this row was added with, so the record is this
+      row's — including when the same model is published under another spelling
+      of it (a route prefix, a date, a marker the deployment appends). That is the
+      resolution the runtime reads for the row too, so checking the spelling again
+      here would only drop an answer the rest of the app uses. The stored wire id
+      stays exactly what the user typed.
+    */
     setModels((current) => applyCustomModelLookup(current, seed, info));
   };
 
@@ -378,10 +388,11 @@ export function ModelSelectionPanes({
       return;
     }
     const discovered = rows.find((row) => row.id.toLowerCase() === id.toLowerCase());
-    const binding = customModelSeedBinding(id, discovered?.info);
+    const binding = discovered?.info
+      ? bindingForCustomModelInfo(id, discovered.info)
+      : customModelSeedBinding(id);
     setModels((current) => [...current, binding]);
-    // Expand the row under the id it is stored with: a discovered row keeps the
-    // service's spelling, which can differ from what the user typed.
+    // Expand the stored wire id, not a catalog spelling that may differ.
     setExpandedModelId(binding.id);
     setCustomModelId("");
     setCustomModelError("");
@@ -557,6 +568,9 @@ export function ModelSelectionPanes({
             />
           </div>
         </div>
+        {autoPicked && models.length > 0 ? (
+          <div className="provider-models-summary-hint">{t("settings.modelsAutoPicked")}</div>
+        ) : null}
         {models.length === 0 ? (
           <div className="provider-chosen-empty">{t("settings.noModelsChosen")}</div>
         ) : visibleChosen.length === 0 ? (
@@ -584,7 +598,7 @@ export function ModelSelectionPanes({
               const publishedDocuments = info ? modelMatchesFilter(info, "pdf") : false;
               const expanded = expandedModelId === binding.id;
               const imageModelSelected = imageModelIds?.some((modelId) =>
-                modelIdsMatch(modelId, binding.id),
+                modelId.toLowerCase() === binding.id.toLowerCase(),
               ) ?? false;
               const advancedId = `model-advanced-${binding.id}`;
               return (
@@ -762,6 +776,7 @@ export function ModelSelectionPanes({
                                 onClick={() =>
                                   updateBinding(binding.id, {
                                     maxTokens: preset.tokens,
+                                    maxTokensSource: "user",
                                   })
                                 }
                               >
@@ -778,6 +793,7 @@ export function ModelSelectionPanes({
                           onChange={(event) =>
                             updateBinding(binding.id, {
                               maxTokens: Number(event.target.value) || 0,
+                              maxTokensSource: "user",
                             })
                           }
                         />
@@ -971,6 +987,7 @@ export function ModelSelectionPanes({
           >
             <div className="provider-custom-model-row">
               <Input
+                ref={customModelInputRef}
                 value={customModelId}
                 placeholder={t("settings.customModelPlaceholder")}
                 className="font-mono text-sm"
@@ -996,75 +1013,21 @@ export function ModelSelectionPanes({
   );
 }
 
-function ModelsFetchErrorMessage({
-  error,
-  variant,
-}: {
-  error?: string;
-  variant: "banner" | "placeholder";
-}) {
-  const { t } = useTranslation();
-  const view = describeModelsFetchError(error);
-  let summary = t("settings.modelsFetchFailed");
-  switch (view.kind) {
-    case "unauthorized":
-      summary = t("errors.PROVIDER_UNAUTHORIZED");
-      break;
-    case "notFound":
-      summary = t("settings.modelsFetchNotFound");
-      break;
-    case "rateLimited":
-      summary = t("errors.PROVIDER_RATE_LIMITED");
-      break;
-    case "timeout":
-      summary = t("errors.TIMEOUT");
-      break;
-    case "network":
-      summary = t("errors.NETWORK_ERROR");
-      break;
-    case "invalidResponse":
-      summary = t("settings.modelsFetchInvalidResponse");
-      break;
-    case "http":
-      summary = t("settings.modelsFetchFailedStatus", {
-        status: view.summaryParams?.status ?? 0,
-      });
-      break;
-  }
-  const className =
-    variant === "placeholder"
-      ? "provider-models-placeholder is-error"
-      : "provider-models-note is-error";
-  return (
-    <div className={className} role="alert">
-      <span className="provider-models-error-summary">{summary}</span>
-      {view.detail ? (
-        <span className="provider-models-error-detail">{view.detail}</span>
-      ) : null}
-      {variant === "placeholder" ? (
-        <span className="provider-models-error-hint">{t("settings.modelsFetchHint")}</span>
-      ) : null}
-    </div>
-  );
-}
-
 type CapabilityToggleProps = {
   label: string;
   /** What models.dev publishes for this model. */
   published: boolean;
   /** Stored override: `true`/`false` explicit, `null`/undefined follows. */
   value: boolean | null | undefined;
-  onChange: (next: boolean | null) => void;
+  onChange: (next: boolean) => void;
 };
 
 /**
  * One attachment capability as a plain checkbox showing the effective answer.
  *
- * The three stored states stay, but they need no third control: ticking the box
- * back to what models.dev publishes stores "follow the catalog" rather than an
- * equal-valued override, so agreeing with the catalog is the reset. That keeps a
- * later catalog correction flowing through without asking the user to
- * understand the distinction.
+ * An untouched checkbox follows the catalog. Once the user changes it, the
+ * selected boolean is explicit and stays pinned even if it currently agrees
+ * with models.dev; catalog refreshes must not undo a deliberate choice.
  */
 function CapabilityToggle({ label, published, value, onChange }: CapabilityToggleProps) {
   const effective = typeof value === "boolean" ? value : published;
@@ -1073,9 +1036,7 @@ function CapabilityToggle({ label, published, value, onChange }: CapabilityToggl
       <input
         type="checkbox"
         checked={effective}
-        onChange={(event) =>
-          onChange(event.target.checked === published ? null : event.target.checked)
-        }
+        onChange={(event) => onChange(event.target.checked)}
       />
       <span>{label}</span>
     </label>

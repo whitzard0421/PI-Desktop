@@ -307,6 +307,7 @@ Gold source: local Codex electron captures; latest row wins where rows conflict.
 | D599 | A development build is its own installation | **Narrow D236 / amend ADR 0094: a development build (unpackaged, or `PI_DESKTOP_DEV=1`) takes `PI-Desktop Dev` as its Electron `userData` — and with it the single-instance lock, renderer `localStorage`, the plugin panel partitions, and browser pane cookies — and reads `~/.pi-desktop-dev`. An explicit `--user-data-dir` still wins, which is how the E2E harnesses point a build at a throwaway profile. A packaged installation keeps `PI-Desktop` and `~/.pi-desktop`, so no existing profile is relocated. `PI_DESKTOP_DATA_DIR` still overrides either profile and is made absolute before it reaches host-core as a child-process environment variable; Electron main publishes the resolved directory back to that variable so the plugin runtime reads one root. No IPC, protocol, schema, or packaged-installation path change. See `03-runtime/07-process-model.md` and E2E-150.** | A packaged app that was already running held the lock, so `pnpm dev` quit on arrival; a development host that won the race instead put a second host-core over the same single-writer `pi.sqlite`, the outbox, and the log tree. |
 | D602 | Crash dumps stay in the data directory | **Electron's Crashpad reporter starts local-only (`uploadToServer: false`) before `ready`. Dumps live under `<data_dir>/crash-dumps`, not the default Electron `userData` crashDumps path, so a `PI_DESKTOP_DATA_DIR` profile does not share dumps. The next lock-holding launch writes one `diagnostics` line for dumps newer than `crash-dumps.json`, classified by Crashpad `ptype`: `error` if any new dump is the browser/main process, `warn` for recovered renderer/GPU/utility crashes. Host-core and sidecar crashes stay on the supervisor path. No upload, no IPC, no schema change.** | A crash left a minidump nobody read. Crashpad also records recovered renderer crashes, so a next-launch `error` that said the previous run died was a lie; and dumps outside the data directory escaped `PI_DESKTOP_DATA_DIR` isolation. |
 | D619 | A copied formula is its TeX source | **Renderer only: a copy whose selection covers rendered math writes `text/plain` from the MathML `annotation` — `$…$` inline, `$$…$$` on its own lines, the delimiters `lib/latex-math.ts` normalizes `\(…\)` and `\[…\]` to, each run widened past any run inside the formula as a code span's fence is — instead of the two trees KaTeX paints. A cut that lands inside a formula grows to the whole formula. Only the formulas are rewritten: the reduced clone is read back through `Selection.toString()`, the serializer a copy itself runs, so prose, lists, tables and code blocks sharing the selection keep the platform's own reading — `user-select: none` chrome left behind included, which `innerText` would have written out. A selection with no formula in it, and a copy raised where the selection does not live, are left to the platform entirely. One flavour is written, `text/plain`: taking the event over drops the platform's `text/html` too and none is written back, because the reduced clone is app markup that would carry the `user-select: none` chrome the text reading drops, and because carrying the rendering instead would paste every formula twice — KaTeX's stylesheet is the only thing hiding the MathML tree and no stylesheet travels on the clipboard. One document `copy` listener owned by the shell, and the transcript's right-click Copy reads the same selection through the same module.** | A formula pasted as its glyphs, once per rendered tree, so it could not be carried into a LaTeX document or another Markdown editor (issue #414). ADR 0268 removed quoting on the grounds that the OS clipboard was the substitute; the clipboard had to actually carry the source. |
+| D620 | pi-ai built-in API-key services are named presets | **Add fifteen named endpoint presets — Ant Ling, Baseten, Cerebras, Hugging Face, Meta (`responses`), MiniMax (International), Moonshot AI (International), NVIDIA, OpenCode Zen, Vercel AI Gateway, Qwen Token Plan (`alibaba-token-plan`), Qwen Token Plan (China), Xiaomi Token Plan (China / Europe / Singapore) — to `NAMED_ENDPOINT_PRESETS`, each at its published host, with the pi-ai provider id kept as an alias wherever the models.dev key differs. Eight built-in providers remain exceptions with a recorded reason: Amazon Bedrock, Azure OpenAI, Cloudflare AI Gateway, Cloudflare Workers AI, Google Vertex AI (account- or region-scoped URLs), GitHub Copilot and OpenAI Codex (vendor-account rows), and Radius (`pi_messages` is account-only here). `packages/agent-runtime/src/pi-ai-provider-sync.test.ts` fails on a pi-ai upgrade that leaves a provider neither covered nor excepted. No protocol, storage, or IPC change.** | Every other pi-ai capability was already reachable, but the API-key half of the service catalog was hand-maintained and had drifted from the library's own provider list (ADR 0307). |
 
 
 ## M0. Model catalog decisions
@@ -352,7 +353,8 @@ Gold source: local Codex electron captures; latest row wins where rows conflict.
 | ID | Topic | Decision | Rationale |
 |---|---|---|---|
 | D118 | Platform application menu and window chrome | **macOS installs a conventional system application menu and keeps hidden-inset traffic lights. Windows/Linux use the shared 46px frameless shell with localized File/Edit/View/Window/Help menus and renderer-drawn minimize/maximize-or-restore/close controls. Both menu surfaces route renderer-owned actions through a fixed `AppMenuCommand` allowlist; renderer menus route native editing/window actions through a separate fixed allowlist. Target packaging builds the local release host before Electron packaging. This adds platform-ready shell behavior but does not reverse D010: Windows/Linux release qualification remains post-MVP.** | A default Electron menu leaves macOS shell commands incomplete, while a frameless Windows/Linux window otherwise loses both application menus and window controls. Shared allowlists keep behavior consistent without exposing an arbitrary privileged command bridge. |
-| D120 | Application update delivery | *(amended by D364 / D603)* **Electron Main exclusively owns a fixed GitHub Releases feed, update polling, typed state, and install lifecycle. Development is disabled; packaged macOS and non-AppImage Linux use notify-and-link delivery, while Windows NSIS and Linux AppImage download in-app and install on quit. Renderer IPC cannot provide feed URLs. Automatic failures stay ambient, explicit checks surface status, and downloaded state remains actionable. The updater always forces `allowPrerelease = false` so prerelease installs (for example `0.2.0-rc.6`) track GitHub's latest stable release instead of electron-updater's default same-channel pin. D126 later publishes every platform feed produced by the tag matrix while macOS remains manual until a signed channel is qualified.** | Keep package installation outside the sandboxed renderer, match delivery to each installer format, and provide one consistent state across menus, Settings, and the update banner (ADR 0022). Without the stable-channel pin, RC builds never surface newer stables because electron-updater treats `rc` as a custom channel. |
+| D120 | Application update delivery | *(amended by D364 / D603 / D628)* **Electron Main exclusively owns a fixed GitHub Releases feed, update polling, typed state, and install lifecycle. Development is disabled; packaged macOS and non-AppImage Linux use notify-and-link delivery, while Windows NSIS and Linux AppImage download in-app and install on quit. Renderer IPC cannot provide feed URLs. Automatic failures stay ambient, explicit checks surface status, and downloaded state remains actionable. The updater always forces `allowPrerelease = false` so prerelease installs (for example `0.2.0-rc.6`) track GitHub's latest stable release instead of electron-updater's default same-channel pin. D126 later publishes every platform feed produced by the tag matrix while macOS remains manual until a signed channel is qualified.** | Keep package installation outside the sandboxed renderer, match delivery to each installer format, and provide one consistent state across menus, Settings, and the update banner (ADR 0022). Without the stable-channel pin, RC builds never surface newer stables because electron-updater treats `rc` as a custom channel. |
+| D628 | User-selectable application update behavior | **Amend D120 / D603 / ADR 0022: persist a per-install `AppSettings.updatePreference` (`automatic` or `manual`). Automatic preserves the existing in-app download/install behavior; it is available only where the platform supports installation. Manual disables automatic download/install-on-quit, keeps scheduled stable-release checks, and reminds once per available version. `lastNotifiedUpdateVersion` persists in the existing Host-owned app settings; neither field is included in portable configuration sync. Default Automatic for Windows NSIS, packaged macOS, and Linux AppImage; default Manual for Windows ZIP/portable and non-AppImage Linux. Windows ZIP/portable can explicitly select Automatic after a warning that NSIS may replace the extracted no-install copy. No database schema or host protocol version bump.** | Give users control while preserving a safe default for no-install packages and preventing repeated notices. |
 | D313 | Main-owned GitHub issue feedback | **GitHub issue forms are the only intake path. The bug form requires description, reproduction steps, expected and actual behavior, app version, and OS; the feature form requires a problem and a proposed change. Settings → Info exposes one Report a problem action on `pi-desktop/app/openFeedback`. Electron Main builds a fixed `bug_report.yml` URL, prefills `app-version` / `os` / `environment` from Main-owned version info, and opens it with `shell.openExternal`. The renderer cannot supply a URL. Feature requests stay on GitHub's template picker. No host-protocol, storage, or update-feed change (ADR 0157).** | Reports without version or steps cannot be triaged, and a renderer-chosen destination would weaken the same Main-owned GitHub URL rule as D120. |
 | D330 | Main-owned `openExternal` protocol allowlist | **Every `shell.openExternal` call parses the URL first. Only `http:`, `https:` (hostname plus a written `//`), and `mailto:` (non-empty address) reach the OS, as a normalized href. `file:`, `javascript:`, `data:`, and custom URI schemes throw `DISALLOWED_EXTERNAL_URL` / plugin `INVALID_ARGUMENT`. Window-open handlers deny in-app and catch the error. Workspace files keep using `shell.openPath` after the path gate (ADR 0109). Preview "open in browser" uses the allowlist for web/mail URLs and `openPath` for an in-root file page (ADR 0168).** | Unvalidated `setWindowOpenHandler` → `openExternal` lets a clicked `ms-msdt:` / `file:` / custom-scheme link invoke an OS protocol handler. |
 | D332 | Classified plugin file preview and live workspace events | **Amend ADR 0104 / 0105 / 0109 / 0111: add `fs.readPreview` under `fs.read` (text / image data URL / binary / tooLarge, same caps as the host Files tab). Broadcast panel events to docked views as well as detached windows. Deliver `workspace:changed` to panels and plugin processes. The bundled Files view restores Open with default app, search, image preview, and copy path on those public channels.** | `fs.readText` cannot preview images or cap large binaries; docked views missed `appearance:changed`; Files polled for project switches. |
@@ -367,6 +369,7 @@ Gold source: local Codex electron captures; latest row wins where rows conflict.
 | D345 | Traditional Chinese shell locale | **Amend D314 / ADR 0160: ship `zh-TW` as an independent full shell catalog with native name 繁體中文. `zh-TW`, `zh-Hant`, `zh-HK`, and `zh-MO` resolve to the Traditional Chinese shell; generic `zh` and Simplified Chinese regions continue to resolve to `zh-CN`. Persisted `AppSettings.language` includes `zh-TW`, Electron packages both `zh-TW` and `zh_TW` locale directories, and the in-app changelog includes a matching `zh-TW` catalog so release notes follow the active Traditional Chinese shell. No host protocol or storage schema change.** | Traditional Chinese users need an independent shell and release-note language; reusing the Simplified Chinese catalog makes Auto detection and visible terminology incorrect. |
 | D346 | P0 international shell locales | **Amend D314 / ADR 0160 / ADR 0182: ship complete `de`, `es`, and `fr` shell catalogs with native names Deutsch, Español, and Français. `de-*`, `es-*`, and `fr-*` resolve to their shipped base catalogs; persisted `AppSettings.language` accepts the three ids; matching changelog catalogs keep release notes in the active locale. No host protocol, storage schema, or IPC version change.** | Spanish, French, and German provide the highest-value missing P0 international coverage while the registry and searchable picker already scale to additional locales. |
 | D349 | Korean shell locale | **Amend D314 / ADR 0160 / ADR 0183: ship a complete `ko` shell catalog with native name 한국어 and English name Korean. `ko` and `ko-*` resolve to the Korean catalog; persisted `AppSettings.language` accepts `ko`; Electron packages the Korean Chromium locale; and a matching Korean changelog keeps release notes in the active locale. No host protocol, storage schema, or IPC version change.** | Korean users need a distinct complete shell and release-note language, while one base catalog preserves the existing searchable locale contract for regional Korean variants. |
+| D605 | Brazilian Portuguese (pt-BR) shell locale | **Amend D314 / ADR 0160 / ADR 0183 / ADR 0185: ship a complete `pt-BR` shell catalog with native name Português (Brasil) and English name Portuguese (Brazil). `pt-BR`, `pt_BR`, and regional `pt-*` resolve to the Brazilian Portuguese catalog; persisted `AppSettings.language` accepts `pt-BR`; Electron packages `pt-BR` and `pt_BR` Chromium locales; and a matching Brazilian Portuguese changelog keeps release notes in the active locale. No host protocol, storage schema, or IPC version change. See ADR 0306.** | Brazilian Portuguese users need a distinct complete shell and release-note language matching the existing searchable locale registry and packaging conventions. |
 | D350 | Focus-aware native task notifications | **Amend D117 / ADR 0107: `notification/showNative` carries `kind` as `task` or `interactive`. Omitted or unknown values default to `task`. Task banners are suppressed whenever the main window is visible and focused, including a focused background session. Interactive prompts are suppressed only for the exact visible focused session. Interactive prompts never create a durable task inbox row. Plugin notifications stay on their permission-gated path. No host protocol or storage schema change. See ADR 0187 and E2E-065 / E2E-065a.** | Task completions and interactive asks share one native channel but need different focus rules. The field is `kind`; a colliding `source` name is not part of the contract. |
 | D358 | Show provider retry causes in the active-turn status | **Amend ADR 0175: `AgentActivity.retrying` may carry bounded, already-redacted error details. The compact retry row stays at rest; hover or keyboard focus reveals the localized summary, stable code/status, and provider message. Intermediate retries never become transcript error rows. See ADR 0196 and US-UI-60d.** | Users need the current retry cause without duplicating the final assistant error. |
 | D359 | Summarize first-turn session titles with a main-owned one-shot | **Keep the first-prompt fallback synchronous. After `agent_end`, the renderer calls allowlisted `session/summarizeTitle`. Electron resolves the session model and runs a thinking-disabled one-shot; a valid result persists through `session.rename`. Automatic replacement refuses a persisted `manualTitle` and any title that is neither a default nor the first-prompt fallback. No host schema change. See ADR 0186 and E2E-021a.** | A truncated first prompt is a poor sidebar label, but title generation must not block the turn or expose credentials to the renderer. |
@@ -467,7 +470,7 @@ section mirrors only marketplace/catalog items still blocking nothing.
 |---|---|---|---|
 | D126 | Three-platform release delivery (lifts D010) | *(amended by D364 / D603)* **Tag builds publish every artifact the matrix produces to the GitHub Release: macOS dmg/zip (arm64), Windows NSIS x64, Linux AppImage + deb (x64), each with blockmaps and the platform's `latest*.yml` electron-updater feed. Publishing the feeds activates D120's in-app update lanes for Windows NSIS and Linux AppImage; macOS stays in notify-and-link mode until a signed channel is qualified. The NSIS artifact name is pinned space-free (`PI-Desktop-Setup-${version}.${ext}`) because GitHub asset URLs mangle spaces. D010's macOS-only scope is lifted per the baseline-bump rule (baseline `0.4.7`); the release pipeline itself was qualified end-to-end on v0.1.1-rc.1/v0.1.1.** | The pipeline builds and validates all three platforms on every tag anyway; keeping installers as expiring Actions artifacts (90-day retention) withheld them from users without adding safety. Publishing the update feeds is the point of shipping: platforms with in-app lanes update silently, and future platform regressions surface through real installs instead of unused artifacts. |
 | D364 | Windows portable exe without installer | *(superseded by D603)* **Amend D120 / D126 / ADR 0022: tag builds publish a Windows x64 portable exe `PI-Desktop-Portable-${version}.exe` alongside the NSIS installer `PI-Desktop-Setup-${version}.exe`. The portable target does not write `latest.yml`. Packaged portable runs (`PORTABLE_EXECUTABLE_FILE`) use notify-and-link delivery. NSIS installs keep in-app download and quit-and-install. Data stays in the existing application data directory. Portable requests user execution level.** | Company environments that whitelist a single executable cannot run the NSIS installer. Applying the NSIS updater to a portable run would install the app, so portable stays manual (ADR 0197, E2E-211). |
-| D603 | Windows portable delivery uses a normal ZIP | **Amend D364 / ADR 0022 / ADR 0197: tag builds publish a Windows x64 portable ZIP `PI-Desktop-Portable-${version}.zip` alongside the NSIS installer `PI-Desktop-Setup-${version}.exe`. The Windows release helper builds NSIS and ZIP separately, stamps ZIP app metadata with `piDistribution = "zip"`, and keeps the ZIP target out of `latest.yml`. Extracted ZIP runs use notify-and-link delivery; the updater still recognizes `PORTABLE_EXECUTABLE_FILE` for older portable executables. Data stays in the existing application data directory.** | The self-extracting portable wrapper could trigger administrator prompts and did not provide a reliable normal executable identity for the taskbar. A user-extracted ZIP launches `PI-Desktop.exe` directly and preserves the manual-update boundary. |
+| D603 | Windows portable delivery uses a normal ZIP | *(amended by D628)* **Amend D364 / ADR 0022 / ADR 0197: tag builds publish a Windows x64 portable ZIP `PI-Desktop-Portable-${version}.zip` alongside the NSIS installer `PI-Desktop-Setup-${version}.exe`. The Windows release helper builds NSIS and ZIP separately, stamps ZIP app metadata with `piDistribution = "zip"`, and keeps the ZIP target out of `latest.yml`. Extracted ZIP runs use notify-and-link delivery; the updater still recognizes `PORTABLE_EXECUTABLE_FILE` for older portable executables. Data stays in the existing application data directory.** | The self-extracting portable wrapper could trigger administrator prompts and did not provide a reliable normal executable identity for the taskbar. A user-extracted ZIP launches `PI-Desktop.exe` directly and preserves the manual-update boundary. |
 | D260 | Release documentation is a version surface | **A stable version bump must update every version-bearing surface before the tag: the shipped-locale in-app changelog and its test list, every workspace `package.json` including `docs/package.json` (a third workspace root `scripts/release.mjs` previously skipped), the Cargo workspace version and `host-core` lockfile entry, `APP_VERSION`, and the `<major>.<minor>.x` release line stated in `README.md` and `README.zh-CN.md`. `scripts/check-release-docs.mjs` verifies all of them; `scripts/release.mjs` runs it after bumping and refuses to commit or tag while any surface disagrees, with `--skip-docs-check` reserved for deliberate non-release bumps. Extends D164.** | The in-app changelog gate alone left published documentation behind: the READMEs still advertised the `0.5.x` line at `0.10.8`, and `docs/package.json` sat at `0.5.8`. A tag is irreversible, so the check runs before the tag exists rather than as review etiquette. |
 | D371 | Explicit unsigned macOS first-launch helper | *(amended by D406 and D443)* **Every macOS distribution ships an executable `PI-Desktop-macOS-open.command`, placed on the DMG in a visible first-launch row below the drag-to-Applications gesture. It searches only `/Applications/PI-Desktop.app` and `~/Applications/PI-Desktop.app`, verifies `CFBundleIdentifier` is `net.aiuo.pi-desktop`, removes only `com.apple.quarantine` when present, and opens the app. It never uses `sudo`, accepts no arbitrary path, and does not replace Developer ID signing or notarization.** | The unsigned macOS lane can be blocked by quarantine with a misleading damaged-app message, and the terminal-only `xattr -cr` note was broader than the launch failure requires (ADR 0204, E2E-196b) |
 | D443 | Canonical application ID and macOS codesign identifier | **Amend D141 / D371 / ADR 0204: the application ID is `net.aiuo.pi-desktop` (`APP_ID`, electron-builder `appId`, macOS `CFBundleIdentifier`, Windows AppUserModelID). Development macOS hosts use `net.aiuo.pi-desktop.dev`. Do not adhoc-sign the unsigned pack in `afterPack`/`afterSign`: nested Electron helpers are still unsigned and `codesign` fails with `code object is not signed at all`. See ADR 0278 and issue #524.** | The owner domain is `net.aiuo.pi-desktop`. Binding the unsigned outer identifier is deferred until a helper-safe pack path exists. |
@@ -1117,9 +1120,11 @@ section mirrors only marketplace/catalog items still blocking nothing.
   is not trustworthy.
 - `env` and `headers` resolve only from the plugin's own settings via
   `{ "setting": "<key>" }`; the host environment is never passed through (D018).
-  A stdio child gets `PATH`, temp/locale vars, and the declared values — nothing
-  else. `command` must be a bare PATH name or plugin-relative; `url` must be
-  `https` unless the host is loopback.
+  A stdio child gets `PATH`, temp/locale, profile/toolchain keys (`HOME`,
+  `USERPROFILE`, `PATHEXT`, `ComSpec`, `FNM_DIR`, …), and the declared values —
+  not provider secrets. Bare `npx`/`uvx` resolve to real binaries (official
+  Node, fnm, nvm, Volta). `command` must be a bare PATH name or plugin-relative;
+  `url` must be `https` unless the host is loopback.
 - Both transports ship rather than stdio alone: a hosted MCP endpoint is common
   enough that stdio-only would have pushed plugins to wrap it in a local shim,
   which is strictly worse — an extra process and an unreviewable proxy.
@@ -7022,3 +7027,200 @@ must keep splitting are covered by `markdown-blocks.test.mjs`.
   unmatched free-form IDs stay generic unknown, while published capabilities
   and explicit binding overrides retain their existing precedence. See
   `03-runtime/13-model-catalog-and-selection.md` §11.3.
+
+## 2026-09-23 — Compact before the hard request budget (D623, issue #970)
+
+- Automatic session and subagent compaction now starts at 90% of the derived
+  `hardLimit`, inline at the next request boundary. New user prompts are
+  included in the preflight estimate; tool results are measured before the
+  follow-up provider request.
+- `hardLimit` remains the final safety boundary. A failed summary below it may
+  proceed without a checkpoint; a context at or above it never reaches the
+  provider. This trades some additional summaries for fewer provider overflows.
+- The runtime remains inline-only: no background summary, user setting,
+  protocol change, or transcript/storage rewrite. See ADR 0064,
+  `03-runtime/02-agent-runtime.md`, and E2E-164.
+
+## 2026-09-24 — Windows stdio MCP resolves official Node and fnm npx (D624, issue #789)
+
+- Amend D176 / D600 / ADR 0038. D600 probes the login-shell PATH on Unix and
+  explicitly keeps Windows on the inherited PATH. That does not start
+  `npx.cmd`: `spawn({ shell: false })` returns ENOENT for `npx` and EINVAL
+  for the `.cmd` shim, even when official Node is on PATH (issue #789).
+- Electron main now resolves bare `npx`/`npm`/`node`/`uvx` before spawn:
+  PATH `node.exe` from an official install wins, then fnm/nvm-windows/Volta.
+  When `npx-cli.js` sits next to `node.exe`, the child is `node` plus that
+  script — no cmd.exe. Remaining `.cmd` files go through
+  `cmd.exe /d /s /c` with quoted literal arguments. PATHEXT is searched
+  before an extensionless Git-Bash `npx` shim.
+- Secrets still do not cross (D018). Command names stay bare. See ADR 0038
+  and `07-plugins/04-plugin-security.md`.
+
+## 2026-09-24 — The transcript occludes itself instead of the dock painting a band (D624, issue #728)
+
+- The opaque `--ds-bg-primary` band added for issue #728 kept transcript rows
+  from showing below the Composer, but it also covered whatever a contributed
+  theme had drawn on the conversation pane. A theme that fills `.main-pane` or
+  `.thread-scroll` (the theme studio's `main` / `thread` regions) got a
+  hard-edged rectangle of the built-in workspace colour across the bottom of the
+  chat. No theme region could reach that band: the only lever was
+  `--ds-bg-primary` itself, which every other primary surface follows.
+- `.composer-dock-docked` now paints nothing, and `.thread-scroll` masks its own
+  content out with `linear-gradient(to bottom, #000 calc(100% -
+  var(--composer-dock-height) - 16px), transparent calc(100% -
+  var(--composer-dock-height) + 2px))`. The gradient resolves against the
+  scrollport's own box, so it stays anchored to the pane while rows move through
+  it. `- 16px` is exactly the trailing reserve `.thread-content` adds below the
+  measured Composer height, so a transcript pinned to its end keeps its last row
+  fully opaque and only the rows crossing the boundary fade.
+- The mask belongs on the scroller rather than on `.thread-wrap`: the minimap
+  rail, the jump-to-latest button, the settle veil, and the navigation status
+  are `.thread-wrap` children that must stay fully painted. The dock's own
+  stacked plates (`.asktool-card`, `.plan-approval-bar`, queued prompts, the
+  shell) were already opaque and are siblings of `.thread-wrap`, so they are
+  unaffected. The scrollport's last 18px of scrollbar now fades instead of being
+  covered by the band.
+- Renderer CSS and the theme surface regression change only. The theme surface
+  probe pins the dock to fully transparent and asserts the mask tracks
+  `--composer-dock-height`. There is no scroll state, protocol, persistence,
+  theme schema, or permission change. See `04-ux/08-component-spec.md` and
+  E2E-CHAT-opaque-floating-decision-and-retry-surfaces.
+
+## 2026-09-25 — Model settings unify around one AI service list and a chosen-models summary (D625)
+
+- The model settings page asked too much before a user could connect anything.
+  API-key services opened on a closed Service menu, vendor subscriptions had
+  their own button and dialog further down the page, and plugin-declared
+  services sat elsewhere again, so the first decision was where to look rather
+  than what to connect. Users reported the flow as needlessly heavy. This
+  redesign keeps the immersive, borderless D297 tone (in-flow surfaces use
+  `--ds-tile`/`--ds-raised` and spacing, no borders; only floating menus and
+  dialogs keep a 0.5px stroke and a shadow) and collapses the choices into one
+  list and one add flow.
+- API services, plugin-declared services and vendor subscription accounts now
+  share a single AI service list (`ServiceList`, `ServiceRow`). A row is itself
+  the way in — a click or Enter opens its editor — so the only controls left on
+  a row are the enable switch and one overflow menu; the click lives on the row
+  element rather than a button so a card drag still starts anywhere on the card.
+  An account row still lives and dies through the vendor-account editor and
+  `deleteOauthAccount`, never the provider CRUD, so ownership boundaries are
+  unchanged even though the two kinds render in one list.
+- Adding a service starts on a searchable chooser (`ServiceChooser`), not a
+  closed menu: subscriptions and API-key services sit side by side as tiles and
+  the custom endpoint comes last, because it is the one choice that asks for
+  more than a key. Filtering never talks to the host. Picking a tile moves to
+  the service form (`ProviderSetupDialog`, two views), and the credential rows
+  live in their own component (`ProviderConnectionFields`, D310 + D625).
+- Both the service dialog and the vendor-account dialog open on a chosen-models
+  summary (`ChosenModelsSummary`) with the full two-pane picker
+  (`ModelSelectionPanes`) one click away, because most people keep the models a
+  service starts with. A new API service preselects recommended models
+  (`recommended-models.ts`, `useRecommendedModelSelection`): only tool-capable
+  chat models are candidates, and when models.dev metadata is present the newest
+  stable model per family wins (up to `RECOMMENDED_MODEL_LIMIT`), with the first
+  pick becoming the service default — so saving a key is enough to start
+  chatting. Without trustworthy discovery (a rejected key, a timeout or a
+  network failure) nothing is preselected; a named vendor that simply has no
+  `/models` route still counts as accepting the key.
+- Covered by `apps/desktop/test/service-chooser.test.mjs`,
+  `service-catalog.test.mjs`, `service-row-status.test.mjs`,
+  `recommended-models.test.mjs`, `provider-form-layout.test.mjs`,
+  `default-model-display.test.mjs` and the updated `settings-general.test.mjs`,
+  plus the `scripts/e2e/provider-api-style.tsx` probe (chooser tiles keyed by
+  `data-service-id`, the custom endpoint last, and the account dialog opening on
+  `provider-models-summary` with per-model controls behind Manage models and a
+  folded Advanced disclosure). ADR 0098 still governs vendor OAuth accounts.
+
+## 2026-09-25 — The custom endpoint leads the API-key group (D626)
+
+- The service chooser listed its API-key tiles in the shared preset order and
+  put the custom endpoint after all of them, so reaching one's own address
+  meant scrolling past every named host first. The custom endpoint now leads
+  the group instead: it is the one choice that needs nothing found before it,
+  and the group still reads as "connect with an API key". The groups keep
+  their order (subscriptions above API-key services), and the keyboard walk
+  still enters the grid at its first tile.
+- Covered by the updated `apps/desktop/test/service-chooser.test.mjs` and the
+  `scripts/e2e/provider-api-style.tsx` probe, which now asserts that the first
+  `[data-service-id]` tile is `custom` rather than the last.
+
+## 2026-09-25 — Model settings open on the two panes, and the fallback list is complete (D627)
+
+- Editing a service or a vendor account used to land on a chosen-models summary
+  (`ChosenModelsSummary`) with the real picker one click away, so reaching a
+  per-model control cost two decisions before it cost any work. Both dialogs now
+  render the two panes (`ModelSelectionPanes`) straight away — the service's own
+  list on the left, the models this credential will run on the right — and the
+  summary plus its Manage models / Collapse pair are gone, along with the
+  `autoPicked` hint that only the summary could show. Preselection is unchanged
+  (`recommended-models.ts`, `useRecommendedModelSelection`); the panel simply
+  states it where the picks are. A recommended model is a starting point, never
+  the only thing on screen.
+- The catalog stand-in for a service that publishes no model list is now the
+  provider's published set as a whole (`modelsForProvider({ includeNonChat: true })`
+  from the settings handler), so embedding, speech, image and reranking
+  endpoints a key can call appear next to the chat models instead of silently
+  missing. The default stays text-only, because session and agent paths ask for
+  what they can actually run, and automatic preselection still filters to
+  tool-capable chat models.
+- Covered by the updated `apps/desktop/test/provider-form-layout.test.mjs`
+  (both dialogs render the panes with no summary to fold),
+  `apps/desktop/test/settings-general.test.mjs`,
+  `apps/desktop/test/service-chooser.test.mjs` and the new
+  `apps/desktop/test/provider-model-list-scope.test.mjs` (the default list is
+  text-only, `includeNonChat` adds the hidden endpoints without dropping or
+  duplicating an id), plus the `scripts/e2e/provider-api-style.tsx` and
+  `scripts/e2e/image-generation-ui.tsx` probes, which no longer click Manage
+  models.
+## 2026-09-26 — User-selectable application update behavior (D628)
+
+- Settings → Info now stores Automatic / Manual per installation. Supported
+  installer builds default to Automatic; Windows ZIP/portable packages and
+  packages without an automatic-install lane default to Manual. Choosing Manual
+  disables automatic download and install-on-quit but keeps scheduled checks.
+- Manual mode announces an available version once. Host settings remember the
+  last reminded version across restarts; the renderer also suppresses a second
+  banner after route remount. The Settings row remains available for checking
+  status and opening the fixed Releases page.
+- Windows ZIP/portable users may explicitly opt into Automatic only after a
+  warning that the NSIS installer can replace the extracted copy. No database
+  migration or host protocol version change is required.
+- Covered by `apps/desktop/test/update-preference.test.mjs`, the updated
+  `apps/desktop/test/auto-update.test.mjs`, and E2E-UPDATE-preference-and-once-only-reminder.
+
+## 2026-09-26 — Bound aggregate image history without an arbitrary message cutoff (D629)
+
+- Vision history restoration keeps the existing 10 MB per-image ceiling and adds
+  a 30 MB aggregate raw-byte budget per runtime rebuild. Eligible refs are
+  considered newest-first; every image remains a provider image block when the
+  history fits, and only older attachments beyond the budget fall back to a
+  safe `@path`. The current prompt row is excluded before hydration so it cannot
+  consume the history allowance.
+- The sidecar reads only files admitted by the budget and clears stale transient
+  base64 from restored attachment objects. Durable host messages remain
+  metadata/ref-only. See ADR 0101, `03-runtime/01-ipc-protocol.md` §5.1,
+  `03-runtime/02-agent-runtime.md` §5c, and E2E-102j.
+
+## 2026-09-27 — Routed model metadata uses conservative last-segment matching (D630, PR #1047)
+
+- Supersede D622's broad catalog aliases for runtime enrichment. Compare only
+  the case-insensitive final `/` segment, so a routed or gateway wire ID can
+  reach a catalog row without treating arbitrary thinking, release-date,
+  deployment-marker, or vendor-dash suffixes as model identity.
+- When a leaf has multiple catalog candidates, select a unique official/source
+  provider only when its provider family agrees with an explicit model source;
+  otherwise borrow metadata only when all candidates expose identical
+  capabilities and thinking metadata. If neither rule proves identity, leave
+  the row unmatched. A known provider may still borrow the exact ID from other
+  publishers; unknown providers do not use unanchored consensus or marker
+  fallback.
+- Composer keeps the complete configured wire ID on model rows. Unmatched
+  models expose the canonical thinking ladder for manual opt-in, but start a
+  new draft/session at `off` unless an explicit binding default exists. An
+  empty binding level array is the generic unknown-model seed, not an explicit
+  disable; a non-empty binding override remains authoritative. Known catalog
+  matches retain the D303 binding-default/highest-enabled behavior.
+- The change is metadata/UI projection only: it does not rewrite persisted wire
+  IDs, provider identity, or host capability ownership. See
+  `03-runtime/13-model-catalog-and-selection.md` §11.3 and
+  `04-ux/08-component-spec.md` §11.

@@ -17,7 +17,6 @@ import type {
   SpeechSynthesizeRequest,
   SpeechSynthesizeResult,
   SpeechTranscribeRequest,
-  SpeechTranscribeResult,
   SessionSummarizeTitleRequest,
   SessionSummarizeTitleResponse,
   AgentStopResponse,
@@ -390,6 +389,9 @@ export function validateSettingsWrite(settings: AppSettings): AppSettings {
     fontScale?: unknown;
     chatContentMaxWidth?: unknown;
     infiniteProviderRetry?: unknown;
+    smoothStreaming?: unknown;
+    updatePreference?: unknown;
+    lastNotifiedUpdateVersion?: unknown;
     networkProxy?: unknown;
     networkPolicy?: unknown;
   };
@@ -431,6 +433,33 @@ export function validateSettingsWrite(settings: AppSettings): AppSettings {
     typeof value.infiniteProviderRetry !== "boolean"
   ) {
     throw Object.assign(new Error("infiniteProviderRetry is invalid"), {
+      errorCode: "INVALID_PARAMS",
+    });
+  }
+  if (
+    Object.prototype.hasOwnProperty.call(value, "smoothStreaming") &&
+    typeof value.smoothStreaming !== "boolean"
+  ) {
+    throw Object.assign(new Error("smoothStreaming is invalid"), {
+      errorCode: "INVALID_PARAMS",
+    });
+  }
+  if (
+    Object.prototype.hasOwnProperty.call(value, "updatePreference") &&
+    value.updatePreference !== "automatic" &&
+    value.updatePreference !== "manual"
+  ) {
+    throw Object.assign(new Error("updatePreference is invalid"), {
+      errorCode: "INVALID_PARAMS",
+    });
+  }
+  if (
+    Object.prototype.hasOwnProperty.call(value, "lastNotifiedUpdateVersion") &&
+    (typeof value.lastNotifiedUpdateVersion !== "string" ||
+      value.lastNotifiedUpdateVersion.trim().length === 0 ||
+      value.lastNotifiedUpdateVersion.length > 128)
+  ) {
+    throw Object.assign(new Error("lastNotifiedUpdateVersion is invalid"), {
       errorCode: "INVALID_PARAMS",
     });
   }
@@ -527,6 +556,8 @@ export const api = {
     kind: "task" | "interactive";
     title: string;
     body: string;
+    /** Durable task timestamp used by Main to reject pre-dismissal replays. */
+    createdAt?: string;
   }) => invoke<{ shown: boolean }>(IPC.invoke.notificationShowNative, input),
   setNotificationViewingSession: (sessionId: string | null) =>
     invoke<{ ok: boolean }>(IPC.invoke.notificationSetViewingSession, {
@@ -672,8 +703,15 @@ export const api = {
    *
    * `source` reports where the list came from: `remote` is the service's own
    * answer, `catalog` means the endpoint published nothing and models.dev was
+   * `source` reports where the list came from: `remote` is the service's own
+   * answer, `catalog` means the endpoint published nothing and models.dev was
    * used instead, `cache` is the local table, `fallback` is just the configured
    * model id.
+   *
+   * The resolution fields let the form show what the probe actually did:
+   * `effectiveBaseUrl` is the address that answered (which may be a completed
+   * candidate rather than the typed URL), `discoveryStyle` is how it was asked,
+   * and `evidence` is the reason the candidate was chosen.
    */
   listProviderModels: (input: {
     providerId?: string;
@@ -687,6 +725,10 @@ export const api = {
       models: ModelInfo[];
       source: "cache" | "remote" | "catalog" | "fallback";
       error?: string;
+      effectiveBaseUrl?: string;
+      discoveryStyle?: string;
+      apiStyleHint?: string;
+      evidence?: string;
     }>(IPC.invoke.providersListModels, input),
   /**
    * Look one hand-typed model id up in the local models.dev snapshot.
@@ -1188,10 +1230,10 @@ export const api = {
   pluginViewOpen: (
     pluginId: string,
     viewId: string,
-    extra?: { sessionId?: string; location?: string },
+    extra?: { sessionId?: string; location?: string; tabId?: string },
   ) => invoke(IPC.invoke.pluginViewOpen, { pluginId, viewId, ...extra }),
-  pluginViewClose: (pluginId: string, viewId: string) =>
-    invoke(IPC.invoke.pluginViewClose, { pluginId, viewId }),
+  pluginViewClose: (pluginId: string, viewId: string, extra?: { sessionId: string; tabId?: string }) =>
+    invoke(IPC.invoke.pluginViewClose, { pluginId, viewId, ...extra }),
   pluginViewSetBounds: (bounds: {
     x: number;
     y: number;

@@ -312,10 +312,13 @@ combined model × reasoning selection (§11).
   content at the top edge reserves the band: the transcript
   (`.thread-content`) and the destination-page frame (`.page-frame`, shared by
   Plugins, Scheduled, and Pull requests) both pad by `--ds-toolbar-height`.
+  Destination pages scroll in a route-owned content container separate from the
+  chat transcript scroller; Composer-specific occlusion and follow behavior must
+  not fade or hide destination rows at the bottom of the page.
   Without that reservation a page header renders behind the band and its title
-  row is clipped. The plugin detail sheet reserves it too (D296): the route
-  surface keeps a transform after its entry animation, so the sheet's fixed
-  layer stacks inside the route rather than above the band.
+  row is clipped. The plugin detail sheet reserves it too (D296): the sheet is
+  mounted on the viewport overlay host, so its fixed layer is independent of
+  the route scroller and the titlebar band.
 
 ### 2.4 States
 
@@ -485,6 +488,11 @@ visually distinct from list content.
   unmounts normally, releasing listeners, and an operation already in flight
   still completes and reports through the normal toast channel; this is not a
   hidden live workbench or durable preference across application restart.
+- Plugin detail, settings, permission-review, template, and install-progress
+  surfaces are viewport-wide overlays. Their backdrops and surfaces mount on
+  `#pi-desktop-overlays`, outside the route scroll container and sidebar
+  stacking contexts, so an expanded sidebar cannot cover the surface or its
+  close/cancel controls.
 - The footer action group stays on the left and the build/version chip stays
   right-aligned; clicking the chip checks for updates or opens the available
   release in Settings
@@ -759,10 +767,13 @@ reading surface of the workstation.
 ### 4.3 Layout
 
 - Background: bg-primary
-- Max content width: 760px default, user-resizable (D439); assistant rows follow the band. User plates stay `min(82%, 600px)`
-  subagent card, or a single tool row — spans that band: its header is a
-  full-width row with an ellipsizing label and a trailing caret, never a
-  content-sized chip, so it follows the dragged width instead of its own text.
+- Max content width: 760px default, user-resizable (D439); assistant rows follow the band. User plates stay `min(82%, 600px)`.
+- Each process, activity group, delegation card, and single tool row spans the
+  conversation band. Its activity header is a full-width row with an
+  ellipsizing label and trailing caret, never a content-sized chip, so it
+  follows the dragged width instead of its own text. Content inside a
+  delegation node and its dock process is width-aware and wraps long task,
+  path, command, and answer text.
 - The transcript keeps one stable scrollbar gutter on the trailing edge. It
   never reserves a matching left gutter, so the minimap and first message do
   not leave a decorative blank strip beside the session.
@@ -1039,14 +1050,31 @@ entirely inside the plugin's isolated page:
   folder the view is browsing — never the whole group — refuses credential
   paths, and records writes to its own audit log (ADR 0241, ADR 0263).
 
-- During a Browser session switch, Main hides the shared guest immediately
-  until the destination's current navigation completes. Root lookup or load
+- During a Browser session switch, Main hides the previous page immediately.
+  A retained destination page is shown without reloading; a new destination
+  stays hidden until its current main-frame navigation commits. Root lookup or load
   completion from a superseded request cannot navigate, reveal, or publish the
   old session as current. A session without a remembered preview stays empty;
   closing the panel or disposing the guest wins over pending work. Normal
   navigation within the same session retains that session's visible content.
-  A failed switch or one exceeding the existing 15-second load wait remains
-  hidden until retried; a late network completion does not automatically reveal it.
+  The address bar immediately shows loading feedback. A current main-frame commit
+  reveals the page without waiting for images or subframes; those continue to
+  drive the loading/stop control. A failed switch or one exceeding the 15-second
+  main-frame wait shows a retryable error, with the old guest hidden. Superseded
+  and cancelled requests cannot publish over the new navigation.
+
+- Opening an HTTP(S) link in the work panel creates an additional Browser
+  resource tab instead of replacing the previous URL. Each tab owns a host-retained WebContents, address, title and navigation
+  history. Switching hides/shows pages without reloading, preserving live form,
+  scroll and JavaScript state. Hidden pages use background throttling. Closing
+  tabs releases their page/CDP resources; no automatic suspension or restart DOM
+  recovery is promised. Address-bar and
+  ordinary in-page navigation stay in the current tab. Website new-window links
+  follow Link open destination: another work-panel tab, or the system browser.
+
+- BrowserPreview creates its resource tab before navigating and never rewrites
+  the prior tab. A background navigation is retained for its session's selected
+  tab (or consumed once by its first tab). A new blank tab reports empty state.
 
 - Main-frame same-document navigation (fragment links and History API routes) updates
   the browser address, history controls, and loading state without requiring a
@@ -1110,7 +1138,11 @@ entirely inside the plugin's isolated page:
   Review, file, or plugin view. Clicking a tab activates it; the active tab is
   scrolled into view. Its close button and middle-click close it, selecting the
   right neighbor and then the left. ArrowLeft/ArrowRight/Home/End move between
-  tabs and Delete/Backspace closes the focused tab. The `+` trigger remains
+  tabs and Delete/Backspace closes the focused tab. Pressing and moving a tab
+  by 8px starts reordering; dropping on either half of another tab inserts the
+  source before or after it. Holding the pointer near either edge auto-scrolls
+  the strip toward off-screen tabs. `Alt+ArrowLeft`/`Alt+ArrowRight` reorders
+  the focused tab without changing its active state. The `+` trigger remains
   fixed beside the strip and creates a new launcher tab.
 - New launcher: each `+` click creates a unique, active New tab. Its body uses
   the Review-plus-plugin tool list as buttons. Selecting a row replaces the
@@ -1199,7 +1231,11 @@ It does not render separate Details or Output tabs.
 - The task description is the Task call's `task` argument, rendered as one
   selectable inset grouped card. The delegate's thinking, tool rows,
   and answer fragments reuse the same components and styling as the main
-  conversation. Reports and counters remain omitted from this compact surface.
+  conversation. Task/node titles, descriptions, and step summaries use the
+  available width and wrap or clamp to multiple lines; long paths, commands,
+  and tool summaries in the live process wrap inside the dock instead of
+  becoming one-line ellipses. Reports and counters remain omitted from this
+  compact surface.
 - The dock has one scroll owner, the panel body. The scroll owner is
   keyboard-focusable and exposed as a polite `role="log"` so streamed rows
   remain discoverable without forcing focus changes. The live process is
@@ -1627,8 +1663,9 @@ Single message render — either user (plaintext) or assistant (markdown streami
 ### 8.3 Layout
 
 - Max content band: 760px default, user-resizable via dual edge handles
-  (D439 / ADR 0277). Assistant, tool, and decision rows follow the band.
-  User plates stay `min(82%, 600px)`.
+  (D439 / ADR 0277). Assistant, tool, decision, and structured assistant-error
+  rows follow the band; error cards fill their message column without a second
+  fixed width cap. User plates stay `min(82%, 600px)`.
 - The live band is `min(available pane, preferred)`. Collapsing the sidebar
   no longer tightens a 640px ceiling; the outer pane stays fluid and the
   width transition follows the sidebar dock.
@@ -1745,6 +1782,11 @@ Single message render — either user (plaintext) or assistant (markdown streami
   Fork creates and activates an independent session whose snapshot ends at the
   selected assistant response, requires an idle source, and leaves that
   source's transcript, live runtime, and provider cache state untouched (D134).
+  Opening a user-message editor must hydrate canonical history before seeding the
+  draft when the loaded transcript is partial or display-limited. Never seed an
+  editable draft from clipped display text. Failed reads keep the editor closed
+  and show an error; stale reads after navigation or a new turn cannot open it.
+  Slash invocations still seed their original typed command.
   Edit belongs to the user turn: it swaps the prompt bubble for a focused
   composer-radius editor filled with `--ds-tile-deep` (the same 8% mix as a
   user bubble) so it stays distinct from the pane without an outer shadow.
@@ -1831,7 +1873,7 @@ Single message render — either user (plaintext) or assistant (markdown streami
 | Streaming | transparent like a completed turn — no left rail, no reserved inset, no whole-turn `--ds-tile` (D323); content grows. The tile belongs only to a subagent/delegation card (D319) |
 | Thinking streaming | disclosure open; answer bubble omitted until answer text exists |
 | Complete | transparent full-width markdown; no streaming chrome |
-| Error | compact assistant error card in transcript; localized summary and stable code share one header with the details disclosure; details still opens to redacted provider response, provider/model IDs, and copy action; the card offers a localized Continue action that resends the continuation prompt; configuration failures show Open settings. The session-scoped failed-turn recovery card is a fallback for terminal failures without a structured assistant error, so both cards never render for one turn |
+| Error | Compact assistant error card in transcript; localized summary and stable code share one header with the details disclosure; details still opens to redacted provider response, provider/model IDs, and copy action; the card offers localized Continue and accessible Dismiss actions. Dismiss affects renderer-only visibility keyed by message id and preserves the original UiMessage/host transcript. Configuration failures show Open settings. The session-scoped failed-turn recovery card is a fallback for terminal failures without a structured assistant error, so both cards never render for one turn |
 
 ### 8.4a Context compaction row
 
@@ -2051,6 +2093,24 @@ Renderer: `apps/desktop/src/components/Markdown.tsx` + `apps/desktop/src/lib/shi
   height derives from `--composer-dock-height`, which the composer republishes as
   its draft grows, so dashes move without a marker change or a window resize.
 
+#### Markdown table actions
+
+Every rendered Markdown table has its own compact toolbar: Copy as Markdown,
+Download as CSV, and Expand table. Copy preserves inline Markdown and column
+alignment and produces a standalone table even inside a quote or list. CSV
+contains the displayed cell text, UTF-8 with BOM, quoted fields, and CRLF rows;
+quotes and cell line breaks are escaped, and formula-leading nonnumeric cells
+are exported as text. Clipboard failures produce an error toast.
+
+The expanded view uses a modal dialog with the existing theme tokens, a scrollable
+table and opaque sticky headers, and copy/download controls. Columns retain
+readable minimum widths; narrow previews scroll horizontally instead of crushing
+short labels. It follows streamed rows,
+contains keyboard focus, closes with Escape or Close, and restores focus to its
+trigger. Native work-panel surfaces remain hidden while the modal is open.
+Tables retain their existing inline layout and link/file actions. No editing,
+sorting, new settings, persistence, or host protocol is introduced.
+
 ---
 
 ## 9. ToolCallRow
@@ -2249,6 +2309,12 @@ the call's own `agent` argument, and carries the call's short `description`. The
 resolved model id is shown immediately after the delegate name, from the
 structured `Task` result details.
 
+The topology node is width-aware at every panel size. Its title may occupy up
+to two lines, its description is clamped to two readable lines, and its step
+summary can wrap rather than forcing the user to resize the divider. Complete
+descriptions remain available through the node's accessible name/hover title;
+the node and its live process never create horizontal overflow.
+
 The lifecycle rows (`TaskWait`/`TaskList`/`TaskStop`) stay compact tool rows —
 they are not topology nodes and must not inflate the subagent counts — but they
 are presented as subagent rows rather than as generic tool calls (D269). A
@@ -2290,40 +2356,51 @@ never summarizes from its own arguments:
   └────────────────┘    └───────────────────────────────────────────┘
 ```
 
-Clicking a topology node toggles an inset grouped side sheet in the right-side
-work-panel dock rather than expanding the transcript. Clicking the selected node
-again closes the side sheet; selecting another node replaces the current detail
-in place:
+Clicking a topology node opens a dedicated `subagent` tab in the work panel —
+the same tab strip that hosts Review, files, and plugin views — instead of
+expanding the transcript. Re-opening the same delegation activates its tab;
+parallel delegates coexist as independent tabs. The tab renders the delegation
+as a conversation:
 
 ```text
 ┌──────────────────────────────────────────────┐
-│ [bot] code-reviewer         [Completed]  32s │
-│       claude-sonnet-4-5                      │
-│                                              │
-│ TASK                                         │
-│ ┌──────────────────────────────────────────┐ │
-│ │ Review the changes in src/stores for …   │ │
-│ │                               Show more  │ │
-│ └──────────────────────────────────────────┘ │
-│                                              │
-│ ACTIVITY                            3 steps  │
-│ ● Thinking …                                 │
-│ ● Read store.ts                              │
+│ [bot] [code-reviewer] [✕]  [bot] [explorer#2] [✕]   [+] ⤢ │
+├──────────────────────────────────────────────┤
+│                    ┌──────────────────────┐ │
+│                    │ Review the changes   │ │
+│                    │ in src/stores.       │ │
+│                    └──────────────────────┘ │
+│ ● Thinking …                                │
+│ ● Read store.ts                             │
+│ The store diff looks consistent. …          │
+│                    ┌──────────────────────┐ │
+│                    │ Now check the tests. │ │
+│                    └──────────────────────┘ │
+│ ● Edit composer.tsx                         │
+├──────────────────────────────────────────────┤
+│ [ Subagents are driven by the main agent… ] │
 └──────────────────────────────────────────────┘
 ```
 
-- The dock renders a sticky identity header with the delegate name and model
-  on the left and the status capsule plus elapsed time trailing on the same
-  row, followed by the Task call's `task` argument as a selectable inset
-  grouped card and the live process timeline.
-- Reports and counters remain omitted from this surface. The live thinking,
-  tool, and answer process is shown on the dock timeline. The topology card
-  remains a compact summary in the transcript and does not gain height when
-  the dock opens.
-- The selected task is re-found from the session's live/retained messages, so
-  the header status and elapsed time stay current while the delegate runs.
-- A missing or deleted task renders a localized unavailable state. Delegation
-  rows remain excluded from the parent turn stream and minimap.
+- The tab is a message list, not a card: every `Task` call of the resume
+  chain renders its `task` argument as a user row (the main transcript's user
+  bubble), and the delegate's thinking, tool, and answer rows under that call
+  render with the same message-list language, so a follow-up prompt reads as
+  the next user turn.
+- The composer at the foot is a disabled two-row textarea whose placeholder
+  says subagents are driven by the main agent and cannot take input; the tab
+  is display-only and has no send path.
+- Tab labels carry the agent name captured when the tab opened, with a
+  strip-order `#n` suffix when the same name occurs more than once; a
+  localization fallback covers a delegate with no name.
+- Tabs are never opened automatically when a delegate starts. They persist
+  after the delegate settles until the user closes them and are scoped to
+  their session like every other tab.
+- The conversation is re-found from the session's live/retained messages, so
+  streaming rows keep arriving in the open tab while the delegate runs.
+- A delegation whose Task calls are missing renders a localized unavailable
+  state. Delegation rows remain excluded from the parent turn stream and
+  minimap.
 
 - Runs are rebuilt from the message list on every render, so group memoization
   compares them by row identity and length rather than by object identity —
@@ -2697,9 +2774,12 @@ reasoning-level control.
   `.composer-toolbar` spacing, minimum heights, theme surfaces, and controls.
   Only the parent placement and the localized placeholder copy differ between
   the empty home and a recorded conversation. In a recorded conversation,
-  `.composer-dock-docked` paints the primary workspace background across its
-  full width. This occlusion band prevents transcript rows from remaining
-  visible beneath the floating shell or through its rounded outer corners.
+  `.composer-dock-docked` paints no backing of its own: `.thread-scroll` masks
+  its own content out across the trailing reserve the transcript holds below
+  the Composer's measured height, so rows fade at the Composer boundary instead
+  of remaining visible beneath the floating shell or through its rounded outer
+  corners, and the conversation pane's own surface stays visible behind the
+  dock (issue #728, D624).
 - Empty draft height: `.composer-input` uses `min-height: 3lh`, so an idle
   composer shows three lines of input before it grows with the draft.
 - Scroll stability: The thread scrollport reserves one stable trailing gutter,
@@ -2726,7 +2806,7 @@ reasoning-level control.
 | Idle (no model) | textarea active, send button disabled + tooltip "Configure a model first" | Agent link remains available in model menu |
 | Idle (ready) | textarea active; Send requires draft content | Send active when content exists |
 | Home/new-session initialization | textarea and mode/model × reasoning/permission triggers remain available while the durable empty session is loading; the session row is already present and the first configuration selection applies to that session | Configure the session, then send |
-| New session (reasoning model) | Combined model × reasoning chip shows the model and its binding default thinking level | User may select any level enabled in the model binding, including Off when enabled |
+| New session (reasoning model) | Combined model × reasoning chip shows the model and its binding default thinking level; an unmatched model starts at Off while keeping the manual ladder available | User may select any level enabled in the model binding, or any canonical level for an unmatched model |
 | New session / switch while another session is running | textarea active, send button enabled for the destination session's own run state | Send active, Stop hidden unless the destination session itself is running with an empty draft |
 | Running | textarea and mode/model × reasoning/permission controls remain editable for the next turn; the single submit slot shows Stop only with an empty draft | Send queues text or attachments; Stop when both are empty |
 | Context checkpoint | Same as Running until durable checkpoint completion; intermediate `turn_end` does not reactivate controls. A retained-tail fallback remains Running and shows a warning toast | Same single-slot Stop/Send behavior as Running |
@@ -2783,6 +2863,8 @@ reasoning-level control.
   Host's durable `position`; at the waiting-block boundary it is a no-op and
   never crosses into the promoted block. Edit removes the row and returns its
   captured draft — text plus inline file-reference chips — to the composer;
+  after an app restart, when that in-memory draft is unavailable, restore the
+  Host-stored content and image/file attachments without rewriting the content;
   while the input is non-empty (or holds attachments) the action is refused with
   a toast and nothing changes. Remove drops the row immediately.
 - Send now: promotes the row to the end of the session's priority block, so a
@@ -2795,9 +2877,12 @@ reasoning-level control.
   up/down, Send now, edit, and remove are disabled. All five tooltips explain
   that it is saving; Send now also displays the localized Saving label. Direct edit/remove actions leave the pending row and draft
   unchanged; after admission, ordinary waiting-row actions become available.
-- A promoted row is locked: move up/down, edit, and remove are disabled with
+- A promoted row fixes order: move up/down and edit are disabled with
   their tooltip and `aria-disabled` state intact, and the Send now button reads
-  as already decided (`chat.sendNowPending`). The row carries a distinct
+  as waiting for the current task (`chat.sendNowPending`). Remove remains
+  available until delivery and waits for Host acknowledgement. If delivery
+  already started, show a conflict message directing the user to Stop.
+  The row carries a distinct
   promoted surface so it is not mistaken for another waiting row.
 - Stop: the single submit slot is shown only while a turn is running and the
   draft is empty. It stops the running turn and cancels pending permission.
@@ -2874,14 +2959,16 @@ reasoning-level control.
   model therefore updates the draft Composer's available levels and binding
   default thinking level immediately; the persisted session keeps the same
   exact-model capability after materialization.
-- A new session whose inherited default model supports reasoning starts with
-  Thinking enabled at that model's stored default thinking level, clamped onto
-  the enabled set. When the binding has no default, it falls back to the
-  highest enabled level. Published levels seed a new binding; an explicit
-  binding can opt into a level the catalog omits. Non-reasoning models and
-  missing capability metadata start at `off` until a user enables a non-`off`
-  level; reopening or reusing an existing session preserves its durable
-  selection.
+- A new session whose catalog-matched default model supports reasoning starts
+  with Thinking enabled at that model's stored default thinking level, clamped
+  onto the enabled set. When the binding has no default, it falls back to the
+  highest enabled level. An unmatched model starts at `off` unless its binding
+  stores an explicit default, while the Composer keeps the canonical ladder
+  available for manual opt-in. Published levels seed a new binding; an
+  explicit binding can opt into a level the catalog omits. Reopening an
+  existing session preserves its durable selection; explicitly switching to a
+  different model applies that binding's default, while selecting the
+  already-active model preserves a manually chosen level.
 - The model menu lists only enabled, runnable providers with configured model
   bindings. Cached or freshly discovered rows may enrich those configured
   models, but unconfigured discovery results never appear in the conversation
@@ -3045,6 +3132,9 @@ Anatomy:
   user-global), app commands (builtin slash aliases), plugin commands.
   The core aliases remain `/new`, `/compact`, `/agent-mode`, `/plan-mode`, and
   `/goal-mode`; matched characters highlight in accent.
+- A whitespace-delimited `/` later in the draft offers active Skills only.
+  Completion replaces only the token under the cursor, so several Skills and
+  ordinary text can coexist in one prompt.
 - Command descriptions use the space left after the slash name and optional
   title/argument hints. A long description truncates before it can squeeze a
   short command name to an ellipsis, including in narrow composers. Names and
@@ -3094,7 +3184,10 @@ Anatomy:
   transient state, and submits it separately from visible text. Main stores
   image bytes under `attachments/<sha256>` and sends visual input only when the
   selected model's effective binding capability accepts images and the 10 MB
-  inline bound is met; otherwise it appends a safe `@path` fallback. Removing
+  inline bound is met; otherwise it appends a safe `@path` fallback. SVG inputs
+  (`image/svg+xml` or `.svg` extension) are always classified as files, never
+  as model images, regardless of vision capability (see
+  `03-runtime/svg-attachment-input.md`). Removing
   a chip does not delete
   scratch bytes. A text-only paste longer than `largePasteThreshold` follows
   the same bounded session bridge with generated `text/plain` UTF-8 bytes,
@@ -3161,10 +3254,17 @@ Anatomy:
   primary-folder file is addressed to the view as a project-relative path and a
   sibling-folder file as an absolute one, which is also how scratch and
   attachment files are addressed. A reference that matches no file opens nothing
-  and reports itself; the OS default application is no longer what this click
-  does. HTTP(S)
+  and reports itself, as does right-clicking it: the file-reference menu offers
+  that file's own folder in the system file manager and copies its full path or
+  its project-relative path. The same items are offered on a sent `@path` chip,
+  an inline code span, a markdown link, a local image, a tool row's file path,
+  and a path in a tool result's file or match list, through the same completion
+  and the same address; a file outside the project has no relative path to copy
+  and says so instead.
+  The OS default application is no longer what this click does. HTTP(S)
   URLs stay text links. Plain clicks follow the Link open destination setting,
-  and right-clicking exposes the same external, work-panel, and copy actions.
+  and right-clicking a URL exposes the same external, work-panel, and copy
+  actions.
 - States: keyboard-active row uses the shared `kb-active` treatment; empty
   query lists everything (slash) / recently indexed order (file); zero
   matches renders the localized empty row and the menu counts as closed for
@@ -3783,10 +3883,21 @@ Sidebar footer                                        Popover (360px max)
 - `All` shows the newest retained rows; `Unread` filters to `readAt == null`.
 - Selecting a row first calls `notification.markRead`, closes the popover, then
   activates the row's durable session (including its project when applicable)
-  and scrolls the transcript to its latest content.
-- Mark all read is idempotent and preserves rows. Clear deletes every inbox
-  row but never deletes a session, transcript, or turn.
-- `notification.changed` updates the visible list and badge. Opening the
+  and scrolls the transcript to its latest content. The successful read also
+  dismisses the matching task-native banner before a late activation can
+  surface it again.
+- Restoring/focusing the app from its taskbar or Dock while an unread terminal
+  outcome's session is already visible in the chat marks that session's
+  matching durable notifications read; it does not mark outcomes belonging to
+  other sessions.
+- Mark all read is idempotent and preserves rows; it dismisses every outstanding
+  task-native banner. Clear deletes every inbox row, dismisses all task-native
+  banners, and leaves sessions, transcripts, and turns intact. These actions
+  remain available for successful completions hidden from the failure-only
+  bell list, so the taskbar unread badge can be cleared from the popover.
+- `notification.changed` updates the visible list and badge only for a new
+  durable id. A duplicate id, or a delayed event for an acknowledged/cleared
+  row, is ignored. Opening the
   popover also refreshes the bounded list from host-core. A
   `notification.activated` event from Electron follows the same session
   activation path as a row click.

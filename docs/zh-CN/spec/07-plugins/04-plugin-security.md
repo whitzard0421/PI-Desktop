@@ -56,14 +56,15 @@
 - 只检查浏览器实际生效的 CSS：先按等长空白遮蔽注释体与字符串字面量
   （每个被遮蔽字符对应一个空格，偏移仍指向原文），`url(...)` 参数按原样保留
   并按目标判定。因此仅在注释或字符串里*提到*被禁关键字的样式表会被接受
-- 拒绝：`@import`、任何不是 `data:` 的 `url()` 目标 URI、`url(`
-  解析器无法解析 `javascript:`、`expression(` 和标记序列
-  （`<style`、`</style`、`<!--`）；空纸也会被拒绝
+- 拒绝：`@import`、既非 `data:` URI 也非已声明主题资源的 `url()` 目标、
+  解析器无法解析的 `url(`、`javascript:`、`expression(` 和标记序列
+  （`<style`、`</style`、`<!--`）；空样式表也会被拒绝
 - 每个文件上限为 256KB，每个插件 8 个主题
-- 主题可声明 `assets`（绝对路径、扩展名白名单、总量上限 4MB）。命中的 `url()`
-  会被改写为 `plugin-asset://<pluginId>/<path>`，由宿主的处理器提供；该处理器
+- 主题可声明 `assets`，使用白名单图片/字体扩展名：插件包内相对路径（在插件根目录内解析，拒绝
+  路径穿越和 `node_modules`）或绝对路径；所有资源总量上限为 4MB。命中的 `url()`
+  会被改写为 `plugin-asset://<pluginId>/<path>`，由宿主处理器提供；该处理器
   只按已加载插件自己登记的清单解析，只读、带 `nosniff`，并在插件卸载时一并撤销。
-  `pi.themes.upsert` 也能在运行时登记同样的路径。未登记的引用仍被拒绝，
+  `pi.themes.upsert` 也可在运行时登记同类路径。未登记的引用仍会被拒绝，
   原始路径不会到达渲染器
 - `contributes.windowAppearance`（`#rrggbb` / `#rrggbbaa`）需要
   `ui.window.appearance`，且只在该插件的某个主题被选中时生效；离开该主题即恢复
@@ -268,13 +269,13 @@ MCP 服务器是 `net.fetch` 旁边的第二个出口路径，因此它是声明
 并且是可审查的而不是编程的——插件无法打开连接
 清单未命名：
 
-- `transport: "stdio"` 生成本地可执行文件 (`mcp.server.local`)。的
-  `command` 必须是裸路径名称或插件相对路径；绝对路径
-  在验证时被拒绝。子进程拿到的是最小环境——声明的 `env` 条目，加上共享
-  白名单（`child-process-env.ts`）：`PATH`、`SystemRoot`、`windir`、`TEMP`、
-  `TMP`、`TMPDIR`、`LANG`、`HOME`、`USER`、`USERPROFILE`。身份变量要透传，
-  是因为子进程是第三方代码，用 `$HOME` 解析 `~` 而不是调用 `os.homedir()`
-  （issue #717）；provider key 和其它宿主状态仍然不会穿越。
+- `transport: "stdio"` 生成本地可执行文件 (`mcp.server.local`)。
+  `command` 必须是裸 PATH 名称或插件相对路径；绝对路径在验证时被拒绝。
+  子进程拿到最小环境——声明的 `env` 条目、共享白名单（`child-process-env.ts`），
+  以及 `npx`/`uvx` 需要的工具链键（`PATHEXT`、`ComSpec`、`FNM_DIR` 等）。
+  Unix 上 PATH 是 login-shell PATH（D600）。裸 `npx`/`uvx` 会解析到真实二进制：
+  官方 Windows Node 走 `node.exe` + `npx-cli.js`，其余 `.cmd` 经 `cmd.exe`
+  以引号字面参数启动（D624）。provider key 和其它宿主状态仍然不会穿越。
 - `transport: "http"` 到达远程端点 (`mcp.server.remote`)。`url` 可以使用
   `http` 或 `https`；非回环 HTTP 不加密，只应在可信网络中使用。插件端点还
   必须被 `manifest.net.domains` 覆盖。工具参数会离开机器，这就是为什么权限
@@ -284,11 +285,12 @@ MCP 服务器是 `net.fetch` 旁边的第二个出口路径，因此它是声明
   清单中的字面秘密是审查气味，而不是受支持的模式
   （D018）。
 - 连接预算：完成 `initialize` 需要 10 秒，每个 `tools/call` 需要 100 秒，每条
-  stdio 线 4MB。`tools/list` 在 §8.1 的每服务器护栏下跟进到最后一页
+  stdio 线 4MB。远程 HTTP 请求采用其对应操作的预算；完成握手后，后续工具调用不会继续受 10 秒握手预算限制。`tools/list` 在 §8.1 的每服务器护栏下跟进到最后一页
   ——2048 个工具、100 页、重复或畸形游标、整轮遍历 30 秒——突破任一护栏的服务器会被
   拒绝，而不是贡献其目录的一个前缀，因为 MCP 工具是以延迟加载的按需条目
   （`ToolSearch` 之后）而非常驻列表的形式到达模型的。服务器按需连接，
   并在插件卸载或禁用时关闭。
+  停止调用方会话会取消该会话正在执行的 MCP 请求，并向服务器发送 `notifications/cancelled`；共享连接及其他会话的调用保持有效。
 
 ## 8.2 桌面控制与设备访问
 

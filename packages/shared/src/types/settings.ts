@@ -9,6 +9,7 @@ import type { GlobalPermissionMode } from "./permissions.js";
 import type { PluginMarketSource } from "./plugins.js";
 import type { SpeechSettings } from "./speech.js";
 import type { ThinkingLevel } from "./models.js";
+import type { UpdatePreference } from "./platform.js";
 
 export type ThemePreference = "system" | "light" | "dark" | `plugin:${string}`;
 
@@ -28,6 +29,10 @@ export type AppSettings = {
   imageGenerationModels?: import("../image-generation.js").ImageGenerationBinding[] | null;
   defaultProviderId?: string;
   defaultModelId?: string;
+  /** Per-install update behavior; absent uses the package's safe default. */
+  updatePreference?: UpdatePreference;
+  /** Last manually announced release; kept local to avoid repeating notices. */
+  lastNotifiedUpdateVersion?: string;
   /** Host speech bindings. Absent means voice actions stay disabled. */
   speech?: SpeechSettings;
   defaultMode: Mode;
@@ -36,6 +41,8 @@ export type AppSettings = {
    * Absent and false use the bounded ten-retry policy.
    */
   infiniteProviderRetry?: boolean;
+  /** Prevent idle system sleep while this desktop app runs; off when absent. */
+  keepAwakeWhileRunning?: boolean;
   /** Configured command shell for the agent Bash protocol tool. */
   defaultCommandShell?: CommandShellId;
   /**
@@ -72,7 +79,7 @@ export type AppSettings = {
   defaultPermissionMode?: GlobalPermissionMode;
   theme: ThemePreference;
   /** UI language; `auto` (and absent) follows the OS locale. */
-  language?: "auto" | "en" | "zh-CN" | "zh-TW" | "tr" | "de" | "es" | "fr" | "ko";
+  language?: "auto" | "en" | "zh-CN" | "zh-TW" | "tr" | "de" | "es" | "fr" | "ko" | "pt-BR";
   /**
    * Global UI font stack (CSS `font-family` value). Absent means the built-in
    * token stack; bundled open-source families and installed system families
@@ -143,7 +150,37 @@ export type AppSettings = {
    * or work panel compresses without rewriting the preference.
    */
   chatContentMaxWidth?: number;
+  /**
+   * Opt-in smooth streaming display (D152 amendment). When enabled, incoming
+   * stream chunks are released character-by-character through a
+   * requestAnimationFrame loop instead of appearing as whole blocks.
+   * Absent and true enable smooth rendering; false disables it. Automatically
+   * disabled when the system prefers reduced motion.
+   */
+  smoothStreaming?: boolean;
+  /**
+   * Prevent the display from sleeping while the app is running. Uses
+   * Electron's `powerSaveBlocker` with `prevent-display-sleep` on all
+   * platforms. Absent and false mean the system manages sleep normally.
+   */
+  preventScreenSleep?: boolean;
+  /** Voice input settings (D-voice-runtime). */
+  voice?: VoiceInputSettings;
   onboardingDismissed: boolean;
+};
+
+export type ChineseVariant = "simplified" | "traditional-taiwan" | "traditional-hong-kong";
+
+export type VoiceInputSettings = {
+  enabled: boolean;
+  /** Microphone device ID; null means system default. */
+  deviceId: string | null;
+  /** Language codes for recognition, e.g. ["zh", "en"]. */
+  languages: string[];
+  /** Chinese output variant. */
+  chineseVariant: ChineseVariant;
+  /** Catalog model ID. Empty string means no model selected yet. */
+  modelId: string;
 };
 
 export type LinkOpenTarget = "workpanel" | "external";

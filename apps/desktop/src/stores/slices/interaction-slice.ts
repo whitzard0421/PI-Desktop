@@ -12,7 +12,7 @@ import {
   headPermission,
   removePermission,
 } from "../../lib/pending-permissions";
-import type { AppState, ToastOptions } from "../app-state";
+import type { AppState } from "../app-state";
 import type { InteractionRuntime } from "../runtime/interaction-runtime";
 import type { SessionRuntime } from "../runtime/session-runtime";
 import type { StoreAccess } from "./types";
@@ -46,8 +46,19 @@ export function createInteractionSlice({
   | "resolvePlan"
   | "showToast"
   | "dismissToast"
+  | "dismissAssistantErrorMessage"
 > {
   return {
+    dismissAssistantErrorMessage: (messageId) => {
+      if (!messageId) return;
+      set((state) => ({
+        dismissedAssistantErrorMessages: {
+          ...state.dismissedAssistantErrorMessages,
+          [messageId]: true,
+        },
+      }));
+    },
+
     setPage: (page, opts) => {
       runtime.beginNavigationIntent();
       const record = opts?.record !== false;

@@ -17,7 +17,10 @@ const {
   pluginWorkPanelTab,
   preferredFileWorkPanelTab,
   replaceWorkPanelTabState,
+  reorderWorkPanelTabsState,
   sanitizeWorkPanelTabsState,
+  subagentTabDisplayLabels,
+  subagentWorkPanelTab,
   switchWorkPanelContextState,
   toolWorkPanelTab,
 } = await import("../src/lib/work-panel-tabs.ts");
@@ -44,14 +47,15 @@ test("new tabs are unique launcher pages and replace themselves with a tool", ()
     openWorkPanelTabState({ tabs: [], activeTabId: null }, first),
     second,
   );
+  const browser = browserPluginTab("https://example.com");
   const replaced = replaceWorkPanelTabState(
     state,
     second.id,
-    browserPluginTab("https://example.com"),
+    browser,
   );
 
-  assert.deepEqual(replaced.tabs.map((tab) => tab.id), [first.id, "plugin:pi.browser/browser"]);
-  assert.equal(replaced.activeTabId, "plugin:pi.browser/browser");
+  assert.deepEqual(replaced.tabs.map((tab) => tab.id), [first.id, browser.id]);
+  assert.equal(replaced.activeTabId, browser.id);
   assert.equal(replaced.tabs.find((tab) => tab.id === first.id)?.kind, "new");
 });
 
@@ -111,6 +115,40 @@ test("closing an inactive tab preserves selection and the last close empties sta
 test("activation ignores stale tab ids", () => {
   const state = { tabs: [toolWorkPanelTab("review")], activeTabId: "review" };
   assert.equal(activateWorkPanelTabState(state, "missing"), state);
+});
+
+test("reordering tabs inserts before or after a target and preserves selection", () => {
+  const review = toolWorkPanelTab("review");
+  const file = fileWorkPanelTab("src/App.tsx");
+  const browser = browserPluginTab();
+  const state = {
+    tabs: [review, file, browser],
+    activeTabId: file.id,
+  };
+
+  const movedAfter = reorderWorkPanelTabsState(state, review.id, browser.id, true);
+  assert.deepEqual(movedAfter.tabs.map((tab) => tab.id), [file.id, browser.id, review.id]);
+  assert.equal(movedAfter.activeTabId, file.id);
+
+  const movedBefore = reorderWorkPanelTabsState(movedAfter, review.id, file.id, false);
+  assert.deepEqual(movedBefore.tabs.map((tab) => tab.id), [review.id, file.id, browser.id]);
+  assert.equal(movedBefore.activeTabId, file.id);
+});
+
+test("reordering an unknown or identical tab is a no-op", () => {
+  const state = {
+    tabs: [toolWorkPanelTab("review"), browserPluginTab()],
+    activeTabId: "review",
+  };
+
+  assert.equal(
+    reorderWorkPanelTabsState(state, "missing", "review", false),
+    state,
+  );
+  assert.equal(
+    reorderWorkPanelTabsState(state, "review", "review", false),
+    state,
+  );
 });
 
 test("unknown retained tabs are discarded without losing a known selection", () => {
@@ -246,4 +284,59 @@ test("a newer retained artifact is not overwritten by a stale visible projection
 
   assert.deepEqual(switched.contexts["session-a"], retained);
   assert.deepEqual(switched.visible, emptyWorkPanelContext());
+});
+
+test("subagent tabs key by delegation and carry the captured agent name", () => {
+  const tab = subagentWorkPanelTab("del-1", "explorer");
+  assert.equal(tab.id, "subagent:del-1");
+  assert.equal(tab.kind, "subagent");
+  assert.equal(tab.resource, "del-1");
+  assert.equal(tab.label, "explorer");
+  const unnamed = subagentWorkPanelTab("del-2");
+  assert.equal(unnamed.label, undefined);
+});
+
+test("subagent tabs reopen in place and close like any resource tab", () => {
+  const empty = { tabs: [], activeTabId: null };
+  const first = openWorkPanelTabState(empty, subagentWorkPanelTab("del-1", "explorer"));
+  const second = openWorkPanelTabState(
+    first,
+    subagentWorkPanelTab("del-2", "explorer"),
+  );
+  assert.equal(second.tabs.length, 2);
+  assert.equal(second.activeTabId, "subagent:del-2");
+  // Re-opening the same delegation reuses its tab instead of stacking one.
+  const reopened = openWorkPanelTabState(second, subagentWorkPanelTab("del-1"));
+  assert.equal(reopened.tabs.length, 2);
+  assert.equal(reopened.activeTabId, "subagent:del-1");
+  const closed = closeWorkPanelTabState(reopened, "subagent:del-1");
+  assert.deepEqual(
+    closed.tabs.map((tab) => tab.id),
+    ["subagent:del-2"],
+  );
+  assert.equal(closed.activeTabId, "subagent:del-2");
+});
+
+test("the sanitizer keeps subagent tabs across session switches", () => {
+  const state = {
+    tabs: [subagentWorkPanelTab("del-1", "explorer"), toolWorkPanelTab("review")],
+    activeTabId: "subagent:del-1",
+  };
+  assert.equal(isKnownWorkPanelTab({ id: "x", kind: "subagent" }), true);
+  assert.deepEqual(sanitizeWorkPanelTabsState(state), state);
+  const switched = switchWorkPanelContextState(
+    {},
+    undefined,
+    { ...state, open: true, fileRequest: null },
+    "session-b",
+  );
+  assert.deepEqual(switched.visible.tabs, []);
+});
+
+test("repeated subagent labels gain a strip-order suffix, singletons stay bare", () => {
+  assert.deepEqual(
+    subagentTabDisplayLabels(["explorer", "reviewer", "explorer", "explorer"]),
+    ["explorer#1", "reviewer", "explorer#2", "explorer#3"],
+  );
+  assert.deepEqual(subagentTabDisplayLabels(["explorer"]), ["explorer"]);
 });

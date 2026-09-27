@@ -482,6 +482,7 @@ function toolResultFromUi(m: UiMessage, timestamp: number): ToolResultMessage {
   const details =
     addedToolNames.length > 0
       ? { ...(detailsRecord ?? {}), addedToolNames }
+
       : rawDetails;
   return {
     role: "toolResult",

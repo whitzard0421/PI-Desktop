@@ -578,4 +578,36 @@ describe("request prefix stability (issue #913)", () => {
     assertUnchangedPrefix(captured[0]!, captured[1]!);
     await runtime.dispose();
   });
+
+  it("keeps serialized runtime-context after completed tool pairs when ToolSearch follows a child start", async () => {
+    subagentRuns.deferred = true;
+    const runtime = createRuntime({ subagents: [explorer] });
+    interceptProviderFetch(runtime, [
+      toolCallSse("Task", { agent: "explorer", task: "Find the bug.", description: "find the bug" }, "task-first"),
+      completedSse("continuing while explorer runs", "run-first"),
+      completedSse("integrated the first report", "deliver-first"),
+      toolCallSse("ToolSearch", { query: "BrowserPreview" }, "search-later"),
+      completedSse("preview is ready", "after-search"),
+    ]);
+
+    const firstTurn = runtime.prompt("Start explorer.", "user-1", "turn-1");
+    await waitCaptured(2);
+    settleExplorer("src/app.ts:12 misses the null check.");
+    await firstTurn;
+    await runtime.prompt("Activate BrowserPreview without using it.", "user-2", "turn-2");
+
+    expect(captured.length).toBeGreaterThanOrEqual(5);
+    const afterActivation = captured[4]!;
+    expect(toolNames(afterActivation)).toContain("BrowserPreview");
+    const input = (Array.isArray(afterActivation.input) ? afterActivation.input : []) as Array<Record<string, unknown>>;
+    const taskOutput = input.findIndex((item) => {
+      const record = item as { type?: unknown; call_id?: unknown };
+      return record.type === "function_call_output" && String(record.call_id).includes("task-first");
+    });
+    const firstContext = input.findIndex((item) => JSON.stringify(item).includes("<runtime-context>"));
+    expect(taskOutput).toBeGreaterThanOrEqual(0);
+    expect(firstContext).toBeGreaterThan(taskOutput);
+    assertToolResults(afterActivation);
+    await runtime.dispose();
+  }, 20_000);
 });

@@ -45,10 +45,12 @@ export class PersistenceOutbox {
       if (this.entries.length >= MAX_ENTRIES) await this.flush(getHost);
       if (this.entries.length >= MAX_ENTRIES) {
         this.logger("error", "session persistence outbox is full", {
+          key: entry.key,
+          sessionId: entry.sessionId,
           size: this.entries.length,
           max: MAX_ENTRIES,
         });
-        return;
+        throw new Error("session persistence outbox is full");
       }
       this.entries.push(entry);
     }
@@ -105,6 +107,15 @@ export class PersistenceOutbox {
           // on this message). Drop only this entry and keep draining so one
           // poisoned head cannot starve later transcript rows (D597).
           this.logger("warn", "session persistence flush dropped poisoned message", {
+            key: current.key,
+            data: String(error),
+          });
+        } else if (isForeignKeyError(error)) {
+          // The parent row (session or turn) was lost — typically after a
+          // sidecar crash that restarted before the outbox could drain.
+          // The host will never accept a child row whose parent is gone,
+          // so drop it and keep draining (#996).
+          this.logger("warn", "session persistence flush dropped orphaned message", {
             key: current.key,
             data: String(error),
           });
@@ -178,4 +189,13 @@ function isDuplicateMessageIdError(error: unknown): boolean {
  */
 function isPoisonMessageError(error: unknown): boolean {
   return /(?<![A-Z_])PERMISSION_DENIED:/i.test(String(error));
+}
+
+/**
+ * The parent row (session or turn) no longer exists. This happens after a
+ * sidecar or host-core crash where the parent was deleted or never committed.
+ * Retrying is pointless — the FK will never be satisfied.
+ */
+function isForeignKeyError(error: unknown): boolean {
+  return /FOREIGN KEY constraint failed/i.test(String(error));
 }

@@ -2,13 +2,15 @@ import { describe, expect, it, vi } from "vitest";
 import { DEEPSEEK_REASONING_REPLAY_PLACEHOLDER } from "@pi-desktop/shared";
 import type { ModelAuth } from "@earendil-works/pi-ai";
 import { convertMessages } from "@earendil-works/pi-ai/api/openai-completions";
-import { modelConfigWithBinding } from "./model-capabilities.js";
+import { genericModelConfig, modelConfigWithBinding } from "./model-capabilities.js";
 import type { ModelConfig } from "./thinking-level.js";
 import {
+  adapterAcceptsCustomFetch,
   apiBindingForStyle,
   buildProviderModel,
   copilotRequestHeaders,
   createProviderModels,
+  providerRequestFetch,
   runtimeBaseUrlForApi,
   type RuntimeProviderConfig,
 } from "./provider-binding.js";
@@ -44,6 +46,26 @@ describe("apiBindingForStyle", () => {
   it("keeps unknown styles on chat completions", () => {
     expect(apiBindingForStyle("not-a-style").api).toBe("openai-completions");
     expect(apiBindingForStyle(undefined).api).toBe("openai-completions");
+  });
+});
+
+describe("custom fetch injection", () => {
+  const wrapper = async () => new Response("ok");
+
+  it("withholds the fetch from the adapters that reject one", () => {
+    expect(adapterAcceptsCustomFetch("google-generative-ai")).toBe(false);
+    expect(adapterAcceptsCustomFetch("google-vertex")).toBe(false);
+    expect(providerRequestFetch("google-generative-ai", wrapper)).toBeUndefined();
+    expect(providerRequestFetch("google-vertex", wrapper)).toBeUndefined();
+  });
+
+  it("passes the caller's fetch to every other adapter", () => {
+    expect(adapterAcceptsCustomFetch("openai-completions")).toBe(true);
+    expect(adapterAcceptsCustomFetch("anthropic-messages")).toBe(true);
+    expect(adapterAcceptsCustomFetch(undefined)).toBe(true);
+    expect(providerRequestFetch("openai-completions", wrapper)).toBe(wrapper);
+    expect(providerRequestFetch("anthropic-messages", wrapper)).toBe(wrapper);
+    expect(providerRequestFetch(undefined, wrapper)).toBe(wrapper);
   });
 });
 
@@ -93,6 +115,127 @@ describe("Anthropic runtime endpoint", () => {
 
     expect(result.stopReason).toBe("error");
     expect(urls).toEqual(["https://gw.example/anthropic/v1/messages?beta=true"]);
+  });
+});
+
+describe("Anthropic adaptive thinking from models.dev reasoning options", () => {
+  function anthropicProvider(
+    modelId: string,
+    reasoningOptions: ModelConfig["reasoningOptions"],
+  ): RuntimeProviderConfig {
+    return {
+      ...keyedProvider,
+      id: "anthropic",
+      name: "Anthropic",
+      baseUrl: "https://api.anthropic.com",
+      modelId,
+      apiStyle: "anthropic_messages",
+      supportsReasoning: true,
+      supportedThinkingLevels: ["low", "medium", "high"],
+      modelConfig: {
+        source: "models.dev",
+        name: modelId,
+        baseUrl: "https://api.anthropic.com",
+        reasoning: true,
+        reasoningOptions,
+        supportedThinkingLevels: ["low", "medium", "high"],
+        input: ["text"],
+        contextWindow: 1_000_000,
+        maxTokens: 128_000,
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      },
+    };
+  }
+
+  async function thinkingRequest(provider: RuntimeProviderConfig) {
+    const model = buildProviderModel(provider);
+    const requests: Record<string, unknown>[] = [];
+    const fetch = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      requests.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+      return new Response("bad gateway", { status: 502 });
+    });
+    await createProviderModels(provider, model)
+      .streamSimple(
+        model,
+        {
+          systemPrompt: "system",
+          messages: [{ role: "user", content: "hello", timestamp: Date.now() }],
+          tools: [],
+        },
+        { reasoning: "medium", fetch, maxRetries: 0 },
+      )
+      .result();
+    return requests[0];
+  }
+
+  it("sends adaptive thinking to effort-only Claude models such as Opus 5.5", async () => {
+    const request = await thinkingRequest(
+      anthropicProvider("claude-opus-5-5", [
+        { type: "effort", values: ["low", "medium", "high", "xhigh", "max"] },
+      ]),
+    );
+
+    expect(request?.thinking).toMatchObject({ type: "adaptive" });
+    expect(request?.thinking).not.toHaveProperty("budget_tokens");
+    expect(request?.output_config).toEqual({ effort: "medium" });
+  });
+
+  it("sends adaptive thinking when an unidentified gateway keeps only the Anthropic wire shape", async () => {
+    const fallback = genericModelConfig("claude-opus-5-5", "https://gateway.example");
+    const modelConfig = modelConfigWithBinding(
+      {
+        ...fallback,
+        reasoningOptions: [
+          { type: "effort", values: ["low", "medium", "high", "xhigh", "max"] },
+        ],
+        thinkingLevelMap: {
+          low: "low",
+          medium: "medium",
+          high: "high",
+          xhigh: "xhigh",
+          max: "max",
+          off: null,
+        },
+      },
+      {
+        contextWindow: 1_000_000,
+        maxTokens: 128_000,
+        thinkingLevels: ["off", "low", "medium", "high"],
+      },
+    );
+    const request = await thinkingRequest({
+      ...anthropicProvider("claude-opus-5-5", modelConfig.reasoningOptions),
+      baseUrl: "https://gateway.example",
+      modelConfig,
+    });
+
+    expect(request?.thinking).toMatchObject({ type: "adaptive" });
+    expect(request?.thinking).not.toHaveProperty("budget_tokens");
+    expect(request?.output_config).toEqual({ effort: "medium" });
+  });
+
+  it("keeps budget thinking for models that publish budget_tokens", async () => {
+    const request = await thinkingRequest(
+      anthropicProvider("claude-sonnet-4-5", [{ type: "budget_tokens", min: 1024 }]),
+    );
+
+    expect(request?.thinking).toMatchObject({ type: "enabled" });
+    expect(request?.thinking).toHaveProperty("budget_tokens");
+  });
+
+  it("preserves an explicit catalog adaptive override", () => {
+    const provider = anthropicProvider("claude-opus-4-6", [
+      { type: "effort", values: ["low", "medium", "high", "max"] },
+      { type: "budget_tokens", min: 1024 },
+    ]);
+    provider.modelConfig = {
+      ...provider.modelConfig!,
+      compat: { forceAdaptiveThinking: true },
+    };
+
+    expect(buildProviderModel(provider).compat).toMatchObject({
+      forceAdaptiveThinking: true,
+    });
   });
 });
 
@@ -555,6 +698,44 @@ describe("buildProviderModel model-level wire API", () => {
       .result();
     expect(result.stopReason).toBe("error");
     expect(urls).toEqual(["https://opencode.ai/zen/go/v1/responses"]);
+  });
+});
+
+describe("buildProviderModel native web search capability", () => {
+  const catalogModel: ModelConfig = {
+    source: "generic",
+    name: "Configured web search model",
+    baseUrl: "https://chatgpt.com/backend-api",
+    reasoning: false,
+    input: ["text"],
+    contextWindow: 128_000,
+    maxTokens: 8_192,
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+  };
+  const configuredModel = modelConfigWithBinding(catalogModel, {
+    contextWindow: 128_000,
+    maxTokens: 8_192,
+    thinkingLevels: ["off"],
+    nativeWebSearch: true,
+  });
+
+  it("forwards an opt-in only when the resolved wire supports it", () => {
+    const codex = buildProviderModel({
+      ...keyedProvider,
+      vendorKey: "openai-codex",
+      apiStyle: "openai_codex_responses",
+      modelConfig: configuredModel,
+    });
+    expect(codex.api).toBe("openai-codex-responses");
+    expect(codex.webSearch).toBe(true);
+
+    const completions = buildProviderModel({
+      ...keyedProvider,
+      apiStyle: "chat_completions",
+      modelConfig: configuredModel,
+    });
+    expect(completions.api).toBe("openai-completions");
+    expect(completions.webSearch).toBeUndefined();
   });
 });
 

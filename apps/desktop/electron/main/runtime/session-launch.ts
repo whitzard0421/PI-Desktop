@@ -6,7 +6,7 @@ import {
   imageGenerationBindings,
   isImageGenerationModel,
   normalizeMode,
-  resolveBindingContextWindow,
+  resolveBindingLimits,
   trustedExtensionAgentKeyFromProviderId,
   type CommandShellCatalog,
   type McpServerRecord,
@@ -20,7 +20,6 @@ import {
 import {
   capabilitiesFromModelConfig,
   clampThinkingLevel,
-  genericModelConfig,
   loadCustomSystemPrompt,
   loadInstructionChain,
   loadSubagentDefinitions,
@@ -33,15 +32,15 @@ import {
 import { builtinSkills } from "../builtin-skills";
 import { OAUTH_AUTH_KIND, type VendorOAuth } from "../oauth";
 import {
-  modelConfigFromModelsDev,
+  catalogModelConfigFor,
   type ModelsDevCatalog,
 } from "../models-dev-catalog";
-import type { HostProcess } from "../host-process";
 import type { Logger } from "../logger";
 import type { PluginRuntime } from "../plugin-runtime";
 import type { UserMcpRuntime } from "../user-mcp";
 import type { RuntimeState } from "./context";
 import type { RuntimeProvider } from "./provider-catalog";
+import type { LoadedSkillDocument } from "../skill-document";
 
 const ErrorCodes = {
   ...SharedErrorCodes,
@@ -69,10 +68,6 @@ export type SessionLaunchRuntimeDependencies = {
     provider: Pick<RuntimeProvider, "models">,
     modelId: string,
   ) => ModelBinding | undefined;
-  modelsDevModelFor: (
-    provider: RuntimeProvider,
-    modelId: string,
-  ) => ReturnType<ModelsDevCatalog["findModel"]>;
   effectiveSubagentModelConfig: (
     provider: Pick<RuntimeProvider, "models">,
     modelId: string,
@@ -96,7 +91,6 @@ export function createSessionLaunchRuntime({
   getWorkspacePath,
   pluginActiveInProject,
   bindingForModel,
-  modelsDevModelFor,
   effectiveSubagentModelConfig,
   normalizeThinkingLevel,
 }: SessionLaunchRuntimeDependencies) {
@@ -226,7 +220,7 @@ export function createSessionLaunchRuntime({
   async function loadUserSkillBody(
     id: string,
     projectPath: string | null,
-  ): Promise<{ id: string; name: string; body: string } | null> {
+  ): Promise<LoadedSkillDocument | null> {
     if (!runtimeState.host || id.includes("/")) return null;
     const result = await runtimeState.host!.call<{
       skill: UserSkillRecord | null;
@@ -237,7 +231,7 @@ export function createSessionLaunchRuntime({
     if (!isActiveInProject(skill, projectPath)) {
       throw new Error(`skill "${id}" is not enabled for this project`);
     }
-    return { id: skill.id, name: skill.name, body: result.body };
+    return { id: skill.id, name: skill.name, body: result.body, location: skill.path };
   }
 
   async function resolveEffectiveCommandShell(): Promise<CommandShellCatalog> {
@@ -354,12 +348,14 @@ export function createSessionLaunchRuntime({
     const storedModel = bindingForModel(provider, modelId);
     const apiStyle = vendorBinding?.apiStyle ?? provider.apiStyle;
     const baseUrl = vendorBinding?.baseUrl ?? provider.baseUrl;
-    const modelsDevModel = modelsDevModelFor(provider, modelId);
     const catalogModelConfig = vendorBinding?.modelConfig ??
-      (modelsDevModel
-        ? modelConfigFromModelsDev(modelsDevModel, baseUrl)
-        : genericModelConfig(modelId, baseUrl ?? ""));
-    const resolvedLimits = resolveBindingContextWindow(catalogModelConfig, storedModel);
+      catalogModelConfigFor(modelsDevCatalog, {
+        vendorKey: provider.vendorKey,
+        baseUrl,
+        apiStyle,
+        modelId,
+      });
+    const resolvedLimits = resolveBindingLimits(catalogModelConfig, storedModel);
     const modelConfig = modelConfigWithBinding(
       resolvedLimits.catalogConfig,
       resolvedLimits.binding,
@@ -485,14 +481,12 @@ export function createSessionLaunchRuntime({
       resolveVendorBinding: (pinned, pinnedModelId) =>
         vendorOAuth.bindingFor(pinned.id, pinnedModelId),
       resolveModel: async (pinned, pinnedModelId) => {
-        const model = modelsDevCatalog.findModel({
+        const catalogModelConfig = catalogModelConfigFor(modelsDevCatalog, {
           vendorKey: pinned.vendorKey,
           baseUrl: pinned.baseUrl,
+          apiStyle: pinned.apiStyle,
           modelId: pinnedModelId,
         });
-        const catalogModelConfig = model
-          ? modelConfigFromModelsDev(model, pinned.baseUrl)
-          : genericModelConfig(pinnedModelId, pinned.baseUrl ?? "");
         const configuredProvider = providers.providers.find(
           (candidate) => candidate.id === pinned.id,
         );
@@ -548,16 +542,19 @@ export function createSessionLaunchRuntime({
           const vb = await vendorOAuth.bindingFor(row.id, binding.id);
           if (!vb) continue;
           catalogModelConfig =
-            vb.modelConfig ?? genericModelConfig(binding.id, vb.baseUrl ?? row.baseUrl ?? "");
+            vb.modelConfig ?? catalogModelConfigFor(modelsDevCatalog, {
+              vendorKey: row.vendorKey,
+              baseUrl: vb.baseUrl ?? row.baseUrl,
+              apiStyle: vb.apiStyle ?? row.apiStyle,
+              modelId: binding.id,
+            });
         } else {
-          const model = modelsDevCatalog.findModel({
+          catalogModelConfig = catalogModelConfigFor(modelsDevCatalog, {
             vendorKey: row.vendorKey,
             baseUrl: row.baseUrl,
+            apiStyle: row.apiStyle,
             modelId: binding.id,
           });
-          catalogModelConfig = model
-            ? modelConfigFromModelsDev(model, row.baseUrl)
-            : genericModelConfig(binding.id, row.baseUrl ?? "");
         }
         const effective = effectiveSubagentModelConfig(
           row,
